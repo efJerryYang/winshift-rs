@@ -6,6 +6,7 @@ description = "A cross-platform window change hook"
 repository = "https://github.com/efJerryYang/winshift-rs"
 authors = ["Jerry Yang <efjerryyang@outlook.com>"]
 keywords = ["window", "hook", "focus", "change"]
+license = "MIT"
 
 [dependencies]
 thiserror = "1.0.63"
