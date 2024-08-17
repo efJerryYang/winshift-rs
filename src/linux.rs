@@ -5,12 +5,12 @@ use std::ffi::CStr;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use libc::{fd_set, timeval, FD_ZERO, FD_SET, select};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use x11::xlib;
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+pub(crate) fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
     unsafe {
         let display = xlib::XOpenDisplay(std::ptr::null());
         if display.is_null() {
@@ -77,7 +77,7 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
                                     ) {
                                         if window_title != last_title {
                                             last_title = window_title.clone();
-                                            if let Ok(guard) = handler.lock() {
+                                            if let Ok(guard) = handler.read() {
                                                 guard.on_focus_change(window_title);
                                             }
                                         }
@@ -95,7 +95,7 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
                                 ) {
                                     if window_title != last_title {
                                         last_title = window_title.clone();
-                                        if let Ok(guard) = handler.lock() {
+                                        if let Ok(guard) = handler.read() {
                                             guard.on_focus_change(window_title);
                                         }
                                     }
@@ -113,7 +113,7 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
                             ) {
                                 if window_title != last_title {
                                     last_title = window_title.clone();
-                                    if let Ok(guard) = handler.lock() {
+                                    if let Ok(guard) = handler.read() {
                                         guard.on_focus_change(window_title);
                                     }
                                 }
@@ -133,8 +133,13 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
     Ok(())
 }
 
-pub fn stop_hook() {
-    RUNNING.store(false, Ordering::Relaxed);
+
+pub fn stop_hook() -> Result<(), WinshiftError> {
+    if RUNNING.swap(false, Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err(WinshiftError::StopError)
+    }
 }
 
 unsafe fn get_active_window(

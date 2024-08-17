@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use windows::{
     Win32::UI::WindowsAndMessaging::*,
     Win32::Foundation::*,
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+pub(crate) fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
     unsafe {
         let hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -43,7 +43,7 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
     }
 }
 
-static mut GLOBAL_HANDLER: Option<Arc<Mutex<dyn FocusChangeHandler>>> = None;
+static mut GLOBAL_HANDLER: Option<Arc<RwLock<dyn FocusChangeHandler>>> = None;
 static mut LAST_TITLE: Option<String> = None;
 
 unsafe extern "system" fn win_event_proc(
@@ -63,7 +63,7 @@ unsafe extern "system" fn win_event_proc(
         if let Some(last_title) = LAST_TITLE.as_ref() {
             if *last_title != title {
                 if let Some(handler) = &GLOBAL_HANDLER {
-                    if let Ok(guard) = handler.lock() {
+                    if let Ok(guard) = handler.read() {
                         guard.on_focus_change(title.clone());
                     }
                 }
@@ -75,9 +75,14 @@ unsafe extern "system" fn win_event_proc(
     }
 }
 
-pub fn stop_hook() {
+
+pub fn stop_hook() -> Result<(), WinshiftError> {
     RUNNING.store(false, Ordering::Relaxed);
     unsafe {
-        PostThreadMessageA(GetCurrentThreadId(), WM_QUIT, WPARAM(0), LPARAM(0));
+        if PostThreadMessageA(GetCurrentThreadId(), WM_QUIT, WPARAM(0), LPARAM(0)).as_bool() {
+            Ok(())
+        } else {
+            Err(WinshiftError::StopError)
+        }
     }
 }

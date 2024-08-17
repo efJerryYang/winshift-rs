@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use crate::error::WinshiftError;
 
 pub trait FocusChangeHandler: Send + Sync {
@@ -6,13 +6,13 @@ pub trait FocusChangeHandler: Send + Sync {
 }
 
 pub struct WindowFocusHook {
-    handler: Arc<Mutex<dyn FocusChangeHandler>>,
+    handler: Arc<RwLock<dyn FocusChangeHandler>>,
 }
 
 impl WindowFocusHook {
     pub fn new<H: FocusChangeHandler + 'static>(handler: H) -> Self {
         Self {
-            handler: Arc::new(Mutex::new(handler)),
+            handler: Arc::new(RwLock::new(handler)),
         }
     }
 
@@ -38,7 +38,7 @@ impl WindowFocusHook {
         }
     }
 
-    pub fn stop(&self) {
+    pub fn stop(&self) -> Result<(), WinshiftError> {
         #[cfg(target_os = "windows")]
         {
             crate::windows::stop_hook()
@@ -52,6 +52,11 @@ impl WindowFocusHook {
         #[cfg(target_os = "macos")]
         {
             crate::macos::stop_hook()
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+        {
+            Err(WinshiftError::PlatformError("Unsupported platform".to_string()))
         }
     }
 }

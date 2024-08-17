@@ -8,6 +8,9 @@ pub enum WinshiftError {
     #[error("Failed to set event hook")]
     HookError,
 
+    #[error("Failed to stop hook")]
+    StopError,
+
     #[error("Platform-specific error: {0}")]
     PlatformError(String),
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::ffi::c_void;
 use core_foundation::{
     base::*,
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
-pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+pub(crate) fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
     unsafe {
         let workspace = NSWorkspace::sharedWorkspace(nil);
         let notification_center: id = msg_send![workspace, notificationCenter];
@@ -68,12 +68,12 @@ pub(crate) fn run_hook(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Result<()
 }
 
 struct WindowObserver {
-    handler: Arc<Mutex<dyn FocusChangeHandler>>,
+    handler: Arc<RwLock<dyn FocusChangeHandler>>,
     last_title: String,
 }
 
 impl WindowObserver {
-    fn new(handler: Arc<Mutex<dyn FocusChangeHandler>>) -> Self {
+    fn new(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Self {
         WindowObserver {
             handler,
             last_title: String::new(),
@@ -84,7 +84,7 @@ impl WindowObserver {
         if let Some(window_title) = get_active_window_title() {
             if window_title != self.last_title {
                 self.last_title = window_title.clone();
-                if let Ok(guard) = self.handler.lock() {
+                if let Ok(guard) = self.handler.read() {
                     guard.on_focus_change(window_title);
                 }
             }
@@ -125,6 +125,11 @@ fn get_active_window_title() -> Option<String> {
     }
 }
 
-pub fn stop_hook() {
-    RUNNING.store(false, Ordering::Relaxed);
+
+pub fn stop_hook() -> Result<(), WinshiftError> {
+    if RUNNING.swap(false, Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err(WinshiftError::StopError)
+    }
 }

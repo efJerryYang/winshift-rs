@@ -1,18 +1,18 @@
-use std::sync::{Arc, Mutex};
+use ctrlc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use winshift::{FocusChangeHandler, WindowFocusHook};
-
 mod logger;
 
 struct WindowChangeHandler {
-    current_window: Arc<Mutex<String>>,
-    last_change: Arc<Mutex<Instant>>,
+    current_window: Arc<RwLock<String>>,
+    last_change: Arc<RwLock<Instant>>,
 }
 
 impl FocusChangeHandler for WindowChangeHandler {
     fn on_focus_change(&self, window_title: String) {
-        let mut current = self.current_window.lock().unwrap();
-        let mut last_change = self.last_change.lock().unwrap();
+        let mut current = self.current_window.write().unwrap();
+        let mut last_change = self.last_change.write().unwrap();
         let now = Instant::now();
 
         *last_change = now;
@@ -34,13 +34,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log_info!("Starting window focus monitoring...");
 
     let handler = WindowChangeHandler {
-        current_window: Arc::new(Mutex::new(String::new())),
-        last_change: Arc::new(Mutex::new(Instant::now())),
+        current_window: Arc::new(RwLock::new(String::new())),
+        last_change: Arc::new(RwLock::new(Instant::now())),
     };
 
-    let hook = WindowFocusHook::new(handler);
-
-    hook.run()?;
+    let hook = Arc::new(WindowFocusHook::new(handler));
+    let hook_clone = hook.clone();
+    ctrlc::set_handler(move || {
+        println!("\nExiting...");
+        if let Err(e) = hook_clone.stop() {
+            log_error!("Error stopping hook: {}", e);
+        }
+    })
+    .expect("Error setting Ctrl-C handler");
+    if let Err(e) = hook.run() {
+        log_error!("Error running hook: {}", e);
+    }
 
     Ok(())
 }
