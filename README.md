@@ -1,8 +1,15 @@
+# winshift
+
+**WARNING**: WIP, only linux (X11) is supported at the moment.
+
+## Example
+
+```rust
 use ctrlc;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use winshift::{FocusChangeHandler, WindowFocusHook};
-use winshift::{logger, log_debug, log_error, log_info, log_warn};
+mod logger;
 
 struct WindowChangeHandler {
     current_window: Arc<RwLock<String>>,
@@ -53,3 +60,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+```

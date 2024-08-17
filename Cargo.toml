@@ -2,6 +2,10 @@
 name = "winshift"
 version = "0.0.1"
 edition = "2021"
+description = "A cross-platform window change hook"
+repository = "https://github.com/efJerryYang/winshift-rs"
+authors = ["Jerry Yang <efjerryyang@outlook.com>"]
+keywords = ["window", "hook", "focus", "change"]
 
 [dependencies]
 thiserror = "1.0.63"
