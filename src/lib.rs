@@ -1,19 +1,62 @@
+//! # winshift
+//!
+//! A cross-platform library for monitoring window focus changes.
+//!
+//! ## Features
+//!
+//! - Cross-platform support (macOS, Linux, Windows)
+//! - Event-driven callback system
+//! - Minimal overhead window monitoring
+//! - Thread-safe design
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use winshift::{FocusChangeHandler, WindowFocusHook};
+//!
+//! struct MyHandler;
+//!
+//! impl FocusChangeHandler for MyHandler {
+//!     fn on_app_change(&self, pid: i32, app_name: String) {
+//!         println!("App changed: {} (PID: {})", app_name, pid);
+//!     }
+//!
+//!     fn on_window_change(&self, window_title: String) {
+//!         println!("Window changed to: {}", window_title);
+//!     }
+//! }
+//!
+//! fn main() -> Result<(), winshift::WinshiftError> {
+//!     let handler = MyHandler;
+//!     let hook = WindowFocusHook::new(handler);
+//!     hook.run()
+//! }
+//! ```
+
 mod error;
 mod hook;
-pub mod logger;
 
-// #[cfg(target_os = "windows")]
-// mod windows;
+
+// Platform-specific implementations
+// TODO: Windows implementation
 
 #[cfg(target_os = "linux")]
 mod linux;
 
-// #[cfg(target_os = "macos")]
-// mod macos;
+#[cfg(target_os = "macos")]
+mod macos;
 
 pub use error::WinshiftError;
-pub use hook::{FocusChangeHandler, WindowFocusHook};
+pub use hook::{FocusChangeHandler, MonitoringMode, WindowFocusHook, WindowHookConfig};
 
-pub fn init_logger() {
-    logger::init();
-}
+// Re-export standard log macros for convenience
+pub use log::{debug, error, info, trace, warn};
+
+// Re-export env_logger for examples and users
+pub use env_logger;
+
+#[cfg(target_os = "macos")]
+pub use macos::stop_hook;
+
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

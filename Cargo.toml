@@ -2,25 +2,74 @@
 name = "winshift"
 version = "0.0.1"
 edition = "2021"
-description = "A cross-platform window change hook"
+description = "A cross-platform window change hook library"
 repository = "https://github.com/efJerryYang/winshift-rs"
 authors = ["Jerry Yang <efjerryyang@outlook.com>"]
 keywords = ["window", "hook", "focus", "change"]
+categories = ["os", "api-bindings", "development-tools"]
 license = "MIT"
+
+[lib]
+name = "winshift"
+path = "src/lib.rs"
 
 [dependencies]
 thiserror = "1.0.63"
 chrono = "0.4.38"
 colored = "2.1.0"
 log = "0.4.22"
-log4rs = "1.3.0"
 ctrlc = "3.4.5"
+log4rs = "1.3.0"
+env_logger = "0.11.8"
+
+[features]
+default = []
+
+[lints.clippy]
+# Performance lints
+inefficient_to_string = "warn"
+manual_string_new = "warn"
+string_add = "warn"
+string_add_assign = "warn"
+
+# Important restriction lints (selective)
+unimplemented = "warn"
+todo = "warn"
+panic = "warn"
+
+# Style lints (practical ones)
+wildcard_imports = "warn"
+missing_const_for_fn = "warn"
+
+# Cargo metadata
+cargo_common_metadata = "warn"
+
+# Allow some that are too strict for low-level system code
+multiple_crate_versions = "allow"
+enum_variant_names = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+undocumented_unsafe_blocks = "allow"
+multiple_unsafe_ops_per_block = "allow"
+unwrap_used = "allow"
+expect_used = "allow"
+too_many_lines = "allow"
+needless_pass_by_value = "allow"
+items_after_statements = "allow"
+if_not_else = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+match_same_arms = "allow"
+
+[lints.rust]
+missing_docs = "allow"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.58.0", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 
 [target."cfg(unix)".dependencies]
-libc = "0.2.156"
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11 = { version = "2.21.0", features = ["xlib"] }
@@ -28,4 +77,7 @@ x11 = { version = "2.21.0", features = ["xlib"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26.0"
 core-foundation = "0.10.0"
-objc = "0.2.7"
+core-graphics = "0.24.0"
+objc = { git = "https://github.com/SSheldon/rust-objc.git", rev = "c8696b0cd1932fdf1b5b22c03af86f32a934f42f" }
+accessibility = "0.2.0"
+accessibility-sys = "0.2.0"

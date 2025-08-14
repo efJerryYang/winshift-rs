@@ -1,64 +1,116 @@
-# winshift
+# winshift-rs
 
-**WARNING**: WIP, only linux (X11) is supported at the moment.
+A cross-platform Rust library for monitoring window focus changes.
 
-## Example
+## Features
+
+- ✅ **Cross-platform**: Supports macOS, Linux (X11)
+- ✅ **Event-driven**: Uses native OS event systems instead of polling
+- ✅ **Thread-safe**: Safe to use across multiple threads
+
+## Platform Implementation
+
+| Platform | Implementation | Status |
+|----------|----------------|--------|
+| **macOS** | NSWorkspace + Accessibility API | ✅ Complete |
+| **Linux** | X11 PropertyNotify events | ✅ Complete |
+
+### macOS Implementation Details
+
+- Uses NSWorkspace notifications for app switching
+- Uses Accessibility API observers for window monitoring within apps
+- macOS Accessibility API has no native system-wide window monitoring
+- Different modes work around these API limitations
+- Requires accessibility permissions
+
+## Quick Start
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+winshift = "0.0.1"
+```
+
+### Basic Usage
 
 ```rust
-use ctrlc;
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
 use winshift::{FocusChangeHandler, WindowFocusHook};
-mod logger;
 
-struct WindowChangeHandler {
-    current_window: Arc<RwLock<String>>,
-    last_change: Arc<RwLock<Instant>>,
-}
+struct MyHandler;
 
-impl FocusChangeHandler for WindowChangeHandler {
-    fn on_focus_change(&self, window_title: String) {
-        let mut current = self.current_window.write().unwrap();
-        let mut last_change = self.last_change.write().unwrap();
-        let now = Instant::now();
+impl FocusChangeHandler for MyHandler {
+    fn on_app_change(&self, pid: i32, app_name: String) {
+        println!("App switched: {} (PID: {})", app_name, pid);
+    }
 
-        *last_change = now;
-
-        if window_title.is_empty() {
-            log_warn!("Received empty window title");
-        } else if *current != window_title {
-            log_info!("Window changed: '{}' -> '{}'", current, window_title);
-            *current = window_title;
-        } else {
-            log_debug!("Window title unchanged: {}", window_title);
-        }
+    fn on_window_change(&self, window_title: String) {
+        println!("Window changed: {}", window_title);
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    logger::init();
-
-    log_info!("Starting window focus monitoring...");
-
-    let handler = WindowChangeHandler {
-        current_window: Arc::new(RwLock::new(String::new())),
-        last_change: Arc::new(RwLock::new(Instant::now())),
-    };
-
-    let hook = Arc::new(WindowFocusHook::new(handler));
-    let hook_clone = hook.clone();
-    ctrlc::set_handler(move || {
-        println!("\nExiting...");
-        if let Err(e) = hook_clone.stop() {
-            log_error!("Error stopping hook: {}", e);
-        }
-    })
-    .expect("Error setting Ctrl-C handler");
-    if let Err(e) = hook.run() {
-        log_error!("Error running hook: {}", e);
-    }
-
-    Ok(())
+fn main() -> Result<(), winshift::WinshiftError> {
+    let handler = MyHandler;
+    let hook = WindowFocusHook::new(handler);
+    hook.run() // Blocks until stop() is called
 }
-
 ```
+
+For usage examples with signal handling, logging, and error handling, see the `examples/` directory.
+
+## Running Examples
+
+```bash
+# Basic monitor
+cargo run --example example_monitor
+
+# With debug logging
+RUST_LOG=debug cargo run --example example_monitor
+```
+
+## Platform-Specific Setup
+
+### macOS
+
+1. **Accessibility Permissions Required**
+   ```
+   System Preferences > Security & Privacy > Privacy > Accessibility
+   ```
+   Add your application or terminal to the allowed list.
+
+
+### Linux (X11)
+
+- Works out of the box on X11 systems
+
+## Architecture
+
+### Event-Driven Design
+
+Winshift-rs uses native OS event systems:
+
+- **macOS**: NSWorkspace notifications + AX observers
+- **Linux**: X11 PropertyNotify events
+
+
+### Error Handling
+
+```rust
+use winshift::WinshiftError;
+
+match hook.run() {
+    Ok(()) => println!("Hook stopped normally"),
+    Err(WinshiftError::PlatformError(msg)) => eprintln!("Platform error: {}", msg),
+    Err(WinshiftError::InitializationError) => eprintln!("Failed to initialize"),
+    Err(WinshiftError::StopError) => eprintln!("Failed to stop cleanly"),
+}
+```
+
+## Implementation Notes
+
+- Thread-safe handler access
+- Proper observer lifecycle management on macOS
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
