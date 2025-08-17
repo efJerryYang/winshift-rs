@@ -470,7 +470,6 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
     info!("Accessibility permissions verified");
 
     static mut GLOBAL_HANDLER: Option<Arc<RwLock<dyn FocusChangeHandler>>> = None;
-
     unsafe fn setup_nsworkspace_notifications_only(
         handler_ptr: *mut Arc<RwLock<dyn FocusChangeHandler>>,
     ) -> Result<(), WinshiftError> {
