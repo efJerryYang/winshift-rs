@@ -1,27 +1,26 @@
-# winshift-rs
+# winshift
 
-A cross-platform Rust library for monitoring window focus changes.
+[![Crates.io](https://img.shields.io/crates/v/winshift)](https://crates.io/crates/winshift)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A cross-platform library for monitoring window focus changes.
 
 ## Features
 
-- ✅ **Cross-platform**: Supports macOS, Linux (X11)
-- ✅ **Event-driven**: Uses native OS event systems instead of polling
-- ✅ **Thread-safe**: Safe to use across multiple threads
+- Native window focus tracking on Linux via X11 (reference implementation)
+- macOS support via Accessibility API (requires app tracking workaround)
+- Event-driven callback system
+- Minimal overhead window monitoring
+- Thread-safe design
 
-## Platform Implementation
+Note: The app tracking functionality on macOS exists solely to work around
+platform limitations for reliable window focus detection.
 
-| Platform | Implementation | Status |
-|----------|----------------|--------|
-| **macOS** | NSWorkspace + Accessibility API | ✅ Complete |
-| **Linux** | X11 PropertyNotify events | ✅ Complete |
+## Supported Platforms
 
-### macOS Implementation Details
-
-- Uses NSWorkspace notifications for app switching
-- Uses Accessibility API observers for window monitoring within apps
-- macOS Accessibility API has no native system-wide window monitoring
-- Different modes work around these API limitations
-- Requires accessibility permissions
+- **Linux**: Native window focus tracking via X11 (reference implementation)
+- **macOS**: Window tracking via Accessibility API workaround (requires app tracking)
+- **Windows**: Planned (not yet implemented)
 
 ## Quick Start
 
@@ -32,16 +31,23 @@ Add to your `Cargo.toml`:
 winshift = "0.0.1"
 ```
 
-### Basic Usage
+Then see the [Examples](#examples) section for usage patterns.
 
-```rust
+## Examples
+
+### Illustrative Usage Pattern
+
+This simplified example shows the basic structure. For complete, working examples see the [examples/](examples/) directory.
+
+```rust,no_run
 use winshift::{FocusChangeHandler, WindowFocusHook};
+use std::sync::Arc;
 
 struct MyHandler;
 
 impl FocusChangeHandler for MyHandler {
     fn on_app_change(&self, pid: i32, app_name: String) {
-        println!("App switched: {} (PID: {})", app_name, pid);
+        println!("App changed: {} (PID: {})", app_name, pid);
     }
 
     fn on_window_change(&self, window_title: String) {
@@ -50,67 +56,51 @@ impl FocusChangeHandler for MyHandler {
 }
 
 fn main() -> Result<(), winshift::WinshiftError> {
-    let handler = MyHandler;
+    let handler = Arc::new(MyHandler);
     let hook = WindowFocusHook::new(handler);
-    hook.run() // Blocks until stop() is called
+    
+    // Start monitoring (runs in current thread)
+    hook.run()?;
+    
+    // On macOS, you can stop with:
+    // winshift::stop_hook();
+    
+    Ok(())
 }
 ```
 
-For usage examples with signal handling, logging, and error handling, see the `examples/` directory.
+**Important Notes**:
 
-## Running Examples
+1. Handler must be thread-safe (use Arc/RwLock if needed)
+2. On macOS, call `stop_hook()` to clean up
+3. See [examples/](examples/) for complete implementations
+4. Linux uses same API but doesn't require combined tracking
 
-```bash
-# Basic monitor
-cargo run --example example_monitor
+## Platform Notes
 
-# With debug logging
-RUST_LOG=debug cargo run --example example_monitor
-```
+### Linux (Reference Implementation)
 
-## Platform-Specific Setup
+- Pure window focus tracking via X11 protocol
+- No app tracking required
+- Tested with common desktop environments (GNOME, KDE, etc.)
 
-### macOS
+### macOS Requirements
 
-1. **Accessibility Permissions Required**
-   ```
-   System Preferences > Security & Privacy > Privacy > Accessibility
-   ```
-   Add your application or terminal to the allowed list.
+- Requires Accessibility permissions
+- Enable in System Preferences > Security & Privacy > Privacy > Accessibility
 
+### Windows
 
-### Linux (X11)
+- Not yet implemented (planned for future release)
 
-- Works out of the box on X11 systems
+## API Documentation
 
-## Architecture
+Full API documentation is available via `cargo doc --open`.
 
-### Event-Driven Design
+## Contributing
 
-Winshift-rs uses native OS event systems:
-
-- **macOS**: NSWorkspace notifications + AX observers
-- **Linux**: X11 PropertyNotify events
-
-
-### Error Handling
-
-```rust
-use winshift::WinshiftError;
-
-match hook.run() {
-    Ok(()) => println!("Hook stopped normally"),
-    Err(WinshiftError::PlatformError(msg)) => eprintln!("Platform error: {}", msg),
-    Err(WinshiftError::InitializationError) => eprintln!("Failed to initialize"),
-    Err(WinshiftError::StopError) => eprintln!("Failed to stop cleanly"),
-}
-```
-
-## Implementation Notes
-
-- Thread-safe handler access
-- Proper observer lifecycle management on macOS
+Contributions are welcome! Please open issues or pull requests on GitHub.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT - See [LICENSE](LICENSE) for details.

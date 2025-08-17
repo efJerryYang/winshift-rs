@@ -4,10 +4,15 @@
 //!
 //! ## Features
 //!
-//! - Cross-platform support (macOS, Linux, Windows)
+//! - Native window focus tracking on Linux via X11
+//! - macOS support via Accessibility API (requires app tracking workaround)
+//! - Windows support planned (not yet implemented)
 //! - Event-driven callback system
 //! - Minimal overhead window monitoring
 //! - Thread-safe design
+//!
+//! Note: The app tracking functionality on macOS exists solely to work around
+//! platform limitations for reliable window focus detection.
 //!
 //! ## Quick Start
 //!
@@ -38,7 +43,7 @@ mod hook;
 
 
 // Platform-specific implementations
-// TODO: Windows implementation
+// TODO: Windows implementation (planned to use SetWinEventHook)
 
 #[cfg(target_os = "linux")]
 mod linux;

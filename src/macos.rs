@@ -107,7 +107,7 @@ fn run_accessibility_hook_with_mode(
     use crate::hook::MonitoringMode;
 
     match mode {
-        MonitoringMode::Comprehensive => run_accessibility_hook(handler),
+        MonitoringMode::Combined => run_accessibility_hook(handler),
         MonitoringMode::AppOnly => run_app_only_hook(handler),
         MonitoringMode::WindowOnly => run_window_only_hook(handler),
     }

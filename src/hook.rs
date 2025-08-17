@@ -6,8 +6,8 @@ use log::{debug, trace};
 /// Monitoring mode for selective event tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitoringMode {
-    /// Monitor both application switches and window changes
-    Comprehensive,
+    /// Monitor both application switches and window changes (required on macOS for proper window tracking)
+    Combined,
     /// Monitor only application switches, ignore window changes
     AppOnly,
     /// Monitor only window changes, ignore application switches
@@ -16,7 +16,7 @@ pub enum MonitoringMode {
 
 impl Default for MonitoringMode {
     fn default() -> Self {
-        Self::Comprehensive
+        Self::Combined
     }
 }
 
@@ -40,7 +40,7 @@ pub trait FocusChangeHandler: Send + Sync {
 #[derive(Debug, Clone, Default)]
 pub struct WindowHookConfig {
     /// Monitoring mode to control which events are tracked
-    /// Default: Comprehensive (both apps and windows)
+    /// Default: Combined (both apps and windows, required on macOS for proper window tracking)
     pub monitoring_mode: MonitoringMode,
 }
 
@@ -52,7 +52,7 @@ pub struct WindowHookConfig {
 /// - **Windows**: Event-driven using `SetWinEventHook` (currently not implemented)
 ///
 /// ## Monitoring Modes:
-/// - **Comprehensive**: Monitors both application switches and window changes (default)
+/// - **Combined**: Monitors both application switches and window changes (default, required on macOS for proper window tracking)
 /// - **`AppOnly`**: Monitors only application switches for optimal performance
 /// - **`WindowOnly`**: Monitors only window changes within the current application
 pub struct WindowFocusHook {
