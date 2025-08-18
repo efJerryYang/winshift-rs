@@ -1,0 +1,16 @@
+# Clippy configuration for enhanced code quality
+
+# Cognitive complexity threshold - functions above this are flagged
+cognitive-complexity-threshold = 30
+
+# Documentation style
+doc-valid-idents = ["API", "APIs", "macOS", "iOS", "NSWorkspace", "CFRunLoop", "AX", "PID"]
+
+# Maximum lines for a single function
+too-many-lines-threshold = 100
+
+# Maximum arguments for a function
+too-many-arguments-threshold = 7
+
+# Avoid abbreviations in names
+avoid-breaking-exported-api = false
