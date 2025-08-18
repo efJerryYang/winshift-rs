@@ -11,7 +11,6 @@ A cross-platform library for monitoring window focus changes.
 - macOS support via Accessibility API (requires app tracking workaround)
 - Event-driven callback system
 - Minimal overhead window monitoring
-- Thread-safe design
 
 Note: The app tracking functionality on macOS exists solely to work around
 platform limitations for reliable window focus detection.
@@ -75,6 +74,7 @@ fn main() -> Result<(), winshift::WinshiftError> {
 2. On macOS, call `stop_hook()` to clean up
 3. See [examples/](examples/) for complete implementations
 4. Linux uses same API but doesn't require combined tracking
+5. Note: Implementation uses unsafe code and assumes single-threaded usage for now
 
 ## Platform Notes
 

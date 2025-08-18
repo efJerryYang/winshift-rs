@@ -1,5 +1,12 @@
-use std::sync::{Arc, RwLock};
+//! # Thread Safety Warning
+//!
+//! This implementation uses `static mut` variables which are not thread-safe.
+//! It assumes single-threaded usage on the main thread only.
+//!
+//! TODO: Replace `static mut` with thread-safe alternatives (Mutex/RwLock)
+//! TODO: Implement hook-specific stop methods instead of global stop
 
+use std::sync::{Arc, RwLock};
 
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {}
@@ -9,6 +16,7 @@ use crate::FocusChangeHandler;
 use log::{debug, error, info, trace, warn};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 
+// TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
 
 pub(crate) fn run_hook_with_config(

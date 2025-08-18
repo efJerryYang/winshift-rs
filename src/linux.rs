@@ -1,3 +1,11 @@
+//! # Thread Safety Warning
+//!
+//! This implementation uses `static mut` variables which are not thread-safe.
+//! It assumes single-threaded usage on the main thread only.
+//!
+//! TODO: Replace `static mut INTERRUPT_PIPE` with thread-safe alternative
+//! TODO: Consider thread-safe X11 event handling
+
 use crate::error::WinshiftError;
 use crate::FocusChangeHandler;
 use log::{debug, error, info, trace, warn};
@@ -8,6 +16,7 @@ use std::os::unix::io::RawFd;
 use std::sync::{Arc, RwLock};
 use x11::xlib;
 
+// TODO: Make this thread-safe (e.g. using lazy_static with Mutex)
 static mut INTERRUPT_PIPE: [RawFd; 2] = [-1, -1];
 
 pub(crate) fn run_hook_with_config(
