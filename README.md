@@ -23,14 +23,11 @@ platform limitations for reliable window focus detection.
 
 ## Quick Start
 
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-winshift = "0.0.1"
+```sh
+cargo add winshift --git https://github.com/efJerryYang/winshift-rs
 ```
 
-Then see the [Examples](#examples) section for usage patterns.
+See the [Examples](#examples) section for usage patterns.
 
 ## Examples
 
