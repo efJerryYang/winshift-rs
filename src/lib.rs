@@ -41,7 +41,6 @@
 mod error;
 mod hook;
 
-
 // Platform-specific implementations
 // TODO: Windows implementation (planned to use SetWinEventHook)
 
@@ -62,6 +61,5 @@ pub use env_logger;
 
 #[cfg(target_os = "macos")]
 pub use macos::stop_hook;
-
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

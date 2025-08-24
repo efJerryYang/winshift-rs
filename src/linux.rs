@@ -8,9 +8,9 @@
 
 use crate::error::WinshiftError;
 use crate::FocusChangeHandler;
-use log::{debug, error, info, trace, warn};
 use libc::{c_char, c_int, c_uchar, c_ulong, c_void, close, pipe, read, write, EINTR};
 use libc::{fd_set, select, FD_SET, FD_ZERO};
+use log::{debug, error, info, trace, warn};
 use std::ffi::CStr;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, RwLock};
@@ -121,8 +121,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                             if window_title != last_title {
                                                 info!(
                                                     "Window focus changed: '{}' -> '{}'",
-                                                    last_title,
-                                                    window_title
+                                                    last_title, window_title
                                                 );
                                                 last_title = window_title.clone();
                                                 if let Ok(guard) = handler.read() {
@@ -145,8 +144,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                         if window_title != last_title {
                                             info!(
                                                 "Window title changed: '{}' -> '{}'",
-                                                last_title,
-                                                window_title
+                                                last_title, window_title
                                             );
                                             last_title = window_title.clone();
                                             if let Ok(guard) = handler.read() {
@@ -169,8 +167,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                     if window_title != last_title {
                                         info!(
                                             "Window changed: '{}' -> '{}'",
-                                            last_title,
-                                            window_title
+                                            last_title, window_title
                                         );
                                         last_title = window_title.clone();
                                         if let Ok(guard) = handler.read() {
