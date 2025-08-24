@@ -1,6 +1,7 @@
 use std::sync::{Arc, RwLock};
-use crate::FocusChangeHandler;
+
 use crate::error::WinshiftError;
+use crate::FocusChangeHandler;
 
 pub(crate) fn run_hook_with_config(
     _handler: Arc<RwLock<dyn FocusChangeHandler>>,

@@ -6,12 +6,10 @@
 //! TODO: Replace `static mut` with thread-safe alternatives (Mutex/RwLock)
 //! TODO: Implement hook-specific stop methods instead of global stop
 
+use std::collections::HashMap;
+use std::ffi;
+use std::ptr;
 use std::sync::{Arc, RwLock};
-
-#[link(name = "AppKit", kind = "framework")]
-extern "C" {}
-use crate::error::WinshiftError;
-use crate::FocusChangeHandler;
 
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
@@ -21,9 +19,12 @@ use objc2::declare::ClassDecl;
 use objc2::runtime;
 use objc2::runtime::{Object, Sel};
 use objc2::{class, msg_send, sel, sel_impl};
-use std::collections::HashMap;
-use std::ffi::c_void;
-use std::ptr;
+
+use crate::error::WinshiftError;
+use crate::FocusChangeHandler;
+
+#[link(name = "AppKit", kind = "framework")]
+extern "C" {}
 // TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
 
@@ -42,7 +43,7 @@ unsafe extern "C" fn window_focus_callback(
     observer: accessibility_sys::AXObserverRef,
     element: accessibility_sys::AXUIElementRef,
     _notification: core_foundation::string::CFStringRef,
-    user_info: *mut std::ffi::c_void,
+    user_info: *mut ffi::c_void,
 ) {
     use accessibility_sys::{kAXTitleAttribute, AXUIElementCopyAttributeValue};
     use core_foundation::base::{CFType, TCFType};
@@ -70,14 +71,13 @@ unsafe extern "C" fn window_focus_callback(
     let handler = &*(user_info as *const Arc<RwLock<dyn FocusChangeHandler>>);
     trace!("Handler dereferenced successfully");
 
-    let mut title_ptr: *mut std::ffi::c_void = ptr::null_mut();
+    let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
     let title_attr = CFString::from_static_string(kAXTitleAttribute);
 
     let result = AXUIElementCopyAttributeValue(
         element,
         title_attr.as_concrete_TypeRef(),
-        std::ptr::from_mut::<*mut std::ffi::c_void>(&mut title_ptr)
-            .cast::<*const std::ffi::c_void>(),
+        std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr).cast::<*const ffi::c_void>(),
     );
 
     if result == 0 && !title_ptr.is_null() {
@@ -140,11 +140,11 @@ fn run_accessibility_hook(
 
     info!("Using Accessibility API for event-driven window monitoring");
 
-        if !unsafe { AXIsProcessTrusted() } {
-            return Err(WinshiftError::Platform(
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err(WinshiftError::Platform(
                 "Accessibility permissions required. Please enable accessibility access in system settings".to_string(),
             ));
-        }
+    }
 
     info!("Accessibility permissions verified");
 
@@ -182,7 +182,7 @@ fn run_accessibility_hook(
             observer,
             app_element,
             window_notification.as_concrete_TypeRef(),
-            handler_ptr.cast::<c_void>(),
+            handler_ptr.cast::<ffi::c_void>(),
         );
 
         trace!(
@@ -607,8 +607,8 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
         handler: &Arc<RwLock<dyn FocusChangeHandler>>,
     ) -> Result<ObserverInfo, WinshiftError> {
         let workspace_class = class!(NSWorkspace);
-        let workspace: *mut objc2::runtime::Object = msg_send![workspace_class, sharedWorkspace];
-        let frontmost_app: *mut objc2::runtime::Object = msg_send![workspace, frontmostApplication];
+        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
+        let frontmost_app: *mut Object = msg_send![workspace, frontmostApplication];
 
         if frontmost_app.is_null() {
             return Err(WinshiftError::Platform(
@@ -637,7 +637,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
             observer,
             app_element,
             window_notification.as_concrete_TypeRef(),
-            handler_ptr.cast::<c_void>(),
+            handler_ptr.cast::<ffi::c_void>(),
         );
 
         if result != 0 {
@@ -720,7 +720,7 @@ fn get_app_name_by_pid(pid: i32) -> Option<String> {
             if !app.is_null() {
                 let app_pid: i32 = msg_send![app, processIdentifier];
                 if app_pid == pid {
-                    let localized_name: *mut runtime::Object = msg_send![app, localizedName];
+                    let localized_name: *mut Object = msg_send![app, localizedName];
                     if !localized_name.is_null() {
                         let name_str: *const std::ffi::c_char =
                             msg_send![localized_name, UTF8String];
@@ -747,39 +747,37 @@ fn get_current_window_title() -> Option<String> {
     unsafe {
         let system_element = AXUIElementCreateSystemWide();
 
-        let mut focused_app: *mut std::ffi::c_void = ptr::null_mut();
+        let mut focused_app: *mut ffi::c_void = ptr::null_mut();
         let focused_app_attr = CFString::from_static_string(kAXFocusedApplicationAttribute);
         let result = AXUIElementCopyAttributeValue(
             system_element,
             focused_app_attr.as_concrete_TypeRef(),
-            std::ptr::from_mut::<*mut std::ffi::c_void>(&mut focused_app)
-                .cast::<*const std::ffi::c_void>(),
+            std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_app).cast::<*const ffi::c_void>(),
         );
 
         if result != 0 || focused_app.is_null() {
             return None;
         }
 
-        let mut focused_window: *mut std::ffi::c_void = ptr::null_mut();
+        let mut focused_window: *mut ffi::c_void = ptr::null_mut();
         let focused_window_attr = CFString::from_static_string(kAXFocusedWindowAttribute);
         let result = AXUIElementCopyAttributeValue(
             focused_app as accessibility_sys::AXUIElementRef,
             focused_window_attr.as_concrete_TypeRef(),
-            std::ptr::from_mut::<*mut std::ffi::c_void>(&mut focused_window)
-                .cast::<*const std::ffi::c_void>(),
+            std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
+                .cast::<*const ffi::c_void>(),
         );
 
         if result != 0 || focused_window.is_null() {
             return None;
         }
 
-        let mut title_ref: *mut std::ffi::c_void = ptr::null_mut();
+        let mut title_ref: *mut ffi::c_void = ptr::null_mut();
         let title_attr = CFString::from_static_string(kAXTitleAttribute);
         let result = AXUIElementCopyAttributeValue(
             focused_window as accessibility_sys::AXUIElementRef,
             title_attr.as_concrete_TypeRef(),
-            std::ptr::from_mut::<*mut std::ffi::c_void>(&mut title_ref)
-                .cast::<*const std::ffi::c_void>(),
+            std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ref).cast::<*const ffi::c_void>(),
         );
 
         if result != 0 || title_ref.is_null() {

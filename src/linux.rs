@@ -6,15 +6,17 @@
 //! TODO: Replace `static mut INTERRUPT_PIPE` with thread-safe alternative
 //! TODO: Consider thread-safe X11 event handling
 
-use crate::error::WinshiftError;
-use crate::FocusChangeHandler;
-use libc::{c_char, c_int, c_uchar, c_ulong, c_void, close, pipe, read, write, EINTR};
-use libc::{fd_set, select, FD_SET, FD_ZERO};
-use log::{debug, error, info, trace, warn};
 use std::ffi::CStr;
 use std::os::unix::io::RawFd;
 use std::sync::{Arc, RwLock};
+
+use libc::{c_char, c_int, c_uchar, c_ulong, c_void, close, pipe, read, write, EINTR};
+use libc::{fd_set, select, FD_SET, FD_ZERO};
+use log::{debug, error, info, trace, warn};
 use x11::xlib;
+
+use crate::error::WinshiftError;
+use crate::FocusChangeHandler;
 
 // TODO: Make this thread-safe (e.g. using lazy_static with Mutex)
 static mut INTERRUPT_PIPE: [RawFd; 2] = [-1, -1];
@@ -32,7 +34,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
         // Create the self-pipe
         if pipe(INTERRUPT_PIPE.as_mut_ptr()) != 0 {
             error!("Failed to create interrupt pipe");
-            return Err(WinshiftError::InitializationError);
+            return Err(WinshiftError::Initialization);
         }
         trace!("Interrupt pipe created");
 
@@ -41,7 +43,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
             error!("Failed to open X11 display");
             close(INTERRUPT_PIPE[0]);
             close(INTERRUPT_PIPE[1]);
-            return Err(WinshiftError::InitializationError);
+            return Err(WinshiftError::Initialization);
         }
         debug!("X11 display opened successfully");
 
@@ -125,7 +127,7 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                                 );
                                                 last_title = window_title.clone();
                                                 if let Ok(guard) = handler.read() {
-                                                    guard.on_focus_change(window_title);
+                                                    guard.on_window_change(window_title);
                                                 }
                                             }
                                         }
@@ -147,9 +149,9 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                                 last_title, window_title
                                             );
                                             last_title = window_title.clone();
-                                            if let Ok(guard) = handler.read() {
-                                                guard.on_focus_change(window_title);
-                                            }
+                                                if let Ok(guard) = handler.read() {
+                                                    guard.on_window_change(window_title);
+                                                }
                                         }
                                     }
                                 }
@@ -170,9 +172,9 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                             last_title, window_title
                                         );
                                         last_title = window_title.clone();
-                                        if let Ok(guard) = handler.read() {
-                                            guard.on_focus_change(window_title);
-                                        }
+                                            if let Ok(guard) = handler.read() {
+                                                guard.on_window_change(window_title);
+                                            }
                                     }
                                 }
                             }
@@ -210,7 +212,7 @@ pub fn stop_hook() -> Result<(), WinshiftError> {
         let buf = [0u8; 1];
         if write(INTERRUPT_PIPE[1], buf.as_ptr() as *const c_void, 1) != 1 {
             error!("Failed to send interrupt signal");
-            return Err(WinshiftError::StopError);
+            return Err(WinshiftError::Stop);
         }
     }
     debug!("Linux hook stop signal sent");

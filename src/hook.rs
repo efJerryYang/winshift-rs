@@ -1,7 +1,8 @@
-use crate::error::WinshiftError;
 use std::sync::{Arc, RwLock};
 
 use log::{debug, trace};
+
+use crate::error::WinshiftError;
 
 /// Monitoring mode for selective event tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,7 +133,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::PlatformError(
+            Err(WinshiftError::Platform(
                 "Unsupported platform".to_string(),
             ))
         }
@@ -165,7 +166,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::PlatformError(
+            Err(WinshiftError::Platform(
                 "Unsupported platform".to_string(),
             ))
         }
