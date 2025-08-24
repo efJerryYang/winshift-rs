@@ -24,7 +24,7 @@ platform limitations for reliable window focus detection.
 ## Quick Start
 
 ```sh
-cargo add winshift --git https://github.com/efJerryYang/winshift-rs
+cargo add winshift
 ```
 
 See the [Examples](#examples) section for usage patterns.
