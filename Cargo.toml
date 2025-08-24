@@ -26,45 +26,6 @@ env_logger = "0.11.8"
 default = []
 cargo-clippy = []
 
-[lints.clippy]
-# Performance lints
-inefficient_to_string = "warn"
-manual_string_new = "warn"
-string_add = "warn"
-string_add_assign = "warn"
-
-# Important restriction lints (selective)
-unimplemented = "warn"
-todo = "warn"
-panic = "warn"
-
-# Style lints (practical ones)
-wildcard_imports = "warn"
-missing_const_for_fn = "warn"
-
-# Cargo metadata
-cargo_common_metadata = "warn"
-
-# Allow some that are too strict for low-level system code
-multiple_crate_versions = "allow"
-enum_variant_names = "allow"
-doc_markdown = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-undocumented_unsafe_blocks = "allow"
-multiple_unsafe_ops_per_block = "allow"
-unwrap_used = "allow"
-expect_used = "allow"
-too_many_lines = "allow"
-needless_pass_by_value = "allow"
-items_after_statements = "allow"
-if_not_else = "allow"
-unnecessary_wraps = "allow"
-unused_self = "allow"
-match_same_arms = "allow"
-
-[lints.rust]
-missing_docs = "allow"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.58.0", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

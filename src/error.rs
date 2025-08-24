@@ -3,26 +3,26 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum WinshiftError {
     #[error("Failed to initialize hook")]
-    InitializationError,
+    Initialization,
 
     #[error("Failed to set event hook")]
-    HookError,
+    Hook,
 
     #[error("Failed to stop hook")]
-    StopError,
+    Stop,
 
     #[error("Platform-specific error: {0}")]
-    PlatformError(String),
+    Platform(String),
 
     #[cfg(target_os = "windows")]
     #[error("Windows API error: {0}")]
-    WindowsError(#[from] windows::core::Error),
+    Windows(#[from] windows::core::Error),
 
     #[cfg(target_os = "linux")]
     #[error("X11 error: {0}")]
-    X11Error(String),
+    X11(String),
 
     #[cfg(target_os = "macos")]
     #[error("macOS error: {0}")]
-    MacOSError(String),
+    MacOS(String),
 }

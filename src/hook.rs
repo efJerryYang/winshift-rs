@@ -52,7 +52,7 @@ pub struct WindowHookConfig {
 /// - **Windows**: Event-driven using `SetWinEventHook` (currently not implemented)
 ///
 /// ## Monitoring Modes:
-/// - **Combined**: Monitors both application switches and window changes (default, required on macOS for proper window tracking)
+/// - **Combined**: Monitors both application switches and window changes (required on macOS for proper window tracking)
 /// - **`AppOnly`**: Monitors only application switches for optimal performance
 /// - **`WindowOnly`**: Monitors only window changes within the current application
 pub struct WindowFocusHook {

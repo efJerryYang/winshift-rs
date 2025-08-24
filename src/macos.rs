@@ -140,11 +140,11 @@ fn run_accessibility_hook(
 
     info!("Using Accessibility API for event-driven window monitoring");
 
-    if !unsafe { AXIsProcessTrusted() } {
-        return Err(WinshiftError::PlatformError(
-            "Accessibility permissions required. Please enable accessibility access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string(),
-        ));
-    }
+        if !unsafe { AXIsProcessTrusted() } {
+            return Err(WinshiftError::Platform(
+                "Accessibility permissions required. Please enable accessibility access in system settings".to_string(),
+            ));
+        }
 
     info!("Accessibility permissions verified");
 
@@ -166,7 +166,7 @@ fn run_accessibility_hook(
         let result = AXObserverCreate(pid, callback, &mut observer);
         trace!("AXObserverCreate result for PID {}: {}", pid, result);
         if result != 0 {
-            return Err(WinshiftError::PlatformError(format!(
+            return Err(WinshiftError::Platform(format!(
                 "Failed to create AX observer for PID {pid}: {result}"
             )));
         }
@@ -199,7 +199,7 @@ fn run_accessibility_hook(
                 error_string(result)
             );
             let _ = Box::from_raw(handler_ptr);
-            return Err(WinshiftError::PlatformError(format!(
+            return Err(WinshiftError::Platform(format!(
                 "Failed to add notification for PID {}: {} ({})",
                 pid,
                 result,
@@ -233,7 +233,7 @@ fn run_accessibility_hook(
 
         let superclass = class!(NSObject);
         let mut decl = ClassDecl::new("WindowMonitorObserver", superclass).ok_or_else(|| {
-            WinshiftError::PlatformError("Failed to create observer class".to_string())
+            WinshiftError::Platform("Failed to create observer class".to_string())
         })?;
 
         extern "C" fn application_did_activate(
@@ -470,8 +470,8 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
     info!("Using NSWorkspace for app-only monitoring (no window observers)");
 
     if !unsafe { accessibility_sys::AXIsProcessTrusted() } {
-        return Err(WinshiftError::PlatformError(
-            "Accessibility permissions required. Please enable accessibility access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string(),
+        return Err(WinshiftError::Platform(
+            "Accessibility permissions required. Please enable accessibility access in system settings".to_string(),
         ));
     }
 
@@ -487,7 +487,7 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
 
         let superclass = class!(NSObject);
         let mut decl = ClassDecl::new("AppOnlyObserver", superclass).ok_or_else(|| {
-            WinshiftError::PlatformError("Failed to create observer class".to_string())
+            WinshiftError::Platform("Failed to create observer class".to_string())
         })?;
 
         extern "C" fn application_did_activate(
@@ -594,8 +594,8 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
     info!("Using Accessibility API for window-only monitoring (no app notifications)");
 
     if !unsafe { AXIsProcessTrusted() } {
-        return Err(WinshiftError::PlatformError(
-            "Accessibility permissions required. Please enable accessibility access in System Preferences > Security & Privacy > Privacy > Accessibility".to_string(),
+        return Err(WinshiftError::Platform(
+            "Accessibility permissions required. Please enable accessibility access in system settings".to_string(),
         ));
     }
 
@@ -611,7 +611,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
         let frontmost_app: *mut objc2::runtime::Object = msg_send![workspace, frontmostApplication];
 
         if frontmost_app.is_null() {
-            return Err(WinshiftError::PlatformError(
+            return Err(WinshiftError::Platform(
                 "No frontmost application found".to_string(),
             ));
         }
@@ -624,7 +624,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
 
         let result = AXObserverCreate(pid, callback, &mut observer);
         if result != 0 {
-            return Err(WinshiftError::PlatformError(format!(
+            return Err(WinshiftError::Platform(format!(
                 "Failed to create AX observer: {result}"
             )));
         }
@@ -642,7 +642,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
 
         if result != 0 {
             let _ = Box::from_raw(handler_ptr);
-            return Err(WinshiftError::PlatformError(format!(
+            return Err(WinshiftError::Platform(format!(
                 "Failed to add notification: {result}"
             )));
         }
