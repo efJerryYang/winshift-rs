@@ -24,6 +24,7 @@ env_logger = "0.11.8"
 
 [features]
 default = []
+cargo-clippy = []
 
 [lints.clippy]
 # Performance lints
@@ -78,6 +79,6 @@ x11 = { version = "2.21.0", features = ["xlib"] }
 cocoa = "0.26.0"
 core-foundation = "0.10.0"
 core-graphics = "0.24.0"
-objc = { git = "https://github.com/SSheldon/rust-objc.git", rev = "c8696b0cd1932fdf1b5b22c03af86f32a934f42f" }
+objc2 = "0.2.7"
 accessibility = "0.2.0"
 accessibility-sys = "0.2.0"

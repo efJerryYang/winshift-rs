@@ -13,9 +13,17 @@ extern "C" {}
 use crate::error::WinshiftError;
 use crate::FocusChangeHandler;
 
-use log::{debug, error, info, trace, warn};
+use core_foundation::base::{CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
-
+use core_foundation::string::CFString;
+use log::{debug, error, info, trace, warn};
+use objc2::declare::ClassDecl;
+use objc2::runtime;
+use objc2::runtime::{Object, Sel};
+use objc2::{class, msg_send, sel, sel_impl};
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr;
 // TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
 
@@ -129,14 +137,6 @@ fn run_accessibility_hook(
         AXObserverCallback, AXObserverCreate, AXObserverGetRunLoopSource,
         AXUIElementCreateApplication,
     };
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Object, Sel};
-    use objc::{class, msg_send, sel};
-    use std::collections::HashMap;
-    use std::ffi::c_void;
-    use std::ptr;
 
     info!("Using Accessibility API for event-driven window monitoring");
 
@@ -462,9 +462,9 @@ fn run_accessibility_hook(
 fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
-    use objc::declare::ClassDecl;
-    use objc::runtime::{Object, Sel};
-    use objc::{class, msg_send, sel};
+    use objc2::declare::ClassDecl;
+    use objc2::runtime::{Object, Sel};
+    use objc2::{class, msg_send, sel};
     use std::ptr;
 
     info!("Using NSWorkspace for app-only monitoring (no window observers)");
@@ -590,10 +590,6 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
         AXObserverCallback, AXObserverCreate, AXObserverGetRunLoopSource,
         AXUIElementCreateApplication,
     };
-    use core_foundation::base::TCFType;
-    use core_foundation::string::CFString;
-    use std::ffi::c_void;
-    use std::ptr;
 
     info!("Using Accessibility API for window-only monitoring (no app notifications)");
 
@@ -610,11 +606,9 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
     unsafe fn create_observer_for_current_app(
         handler: &Arc<RwLock<dyn FocusChangeHandler>>,
     ) -> Result<ObserverInfo, WinshiftError> {
-        use objc::{class, msg_send};
-
         let workspace_class = class!(NSWorkspace);
-        let workspace: *mut objc::runtime::Object = msg_send![workspace_class, sharedWorkspace];
-        let frontmost_app: *mut objc::runtime::Object = msg_send![workspace, frontmostApplication];
+        let workspace: *mut objc2::runtime::Object = msg_send![workspace_class, sharedWorkspace];
+        let frontmost_app: *mut objc2::runtime::Object = msg_send![workspace, frontmostApplication];
 
         if frontmost_app.is_null() {
             return Err(WinshiftError::PlatformError(
@@ -704,17 +698,17 @@ fn run_cfrunloop() {
 }
 
 fn get_app_name_by_pid(pid: i32) -> Option<String> {
-    use objc::{class, msg_send};
+    use objc2::{class, msg_send};
 
     unsafe {
         let workspace_class = class!(NSWorkspace);
-        let workspace: *mut objc::runtime::Object = msg_send![workspace_class, sharedWorkspace];
+        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
 
         if workspace.is_null() {
             return None;
         }
 
-        let running_apps: *mut objc::runtime::Object = msg_send![workspace, runningApplications];
+        let running_apps: *mut runtime::Object = msg_send![workspace, runningApplications];
 
         if running_apps.is_null() {
             return None;
@@ -722,11 +716,11 @@ fn get_app_name_by_pid(pid: i32) -> Option<String> {
 
         let count: usize = msg_send![running_apps, count];
         for i in 0..count {
-            let app: *mut objc::runtime::Object = msg_send![running_apps, objectAtIndex: i];
+            let app: *mut runtime::Object = msg_send![running_apps, objectAtIndex: i];
             if !app.is_null() {
                 let app_pid: i32 = msg_send![app, processIdentifier];
                 if app_pid == pid {
-                    let localized_name: *mut objc::runtime::Object = msg_send![app, localizedName];
+                    let localized_name: *mut runtime::Object = msg_send![app, localizedName];
                     if !localized_name.is_null() {
                         let name_str: *const std::ffi::c_char =
                             msg_send![localized_name, UTF8String];
@@ -749,9 +743,6 @@ fn get_current_window_title() -> Option<String> {
         kAXFocusedApplicationAttribute, kAXFocusedWindowAttribute, kAXTitleAttribute,
         AXUIElementCopyAttributeValue, AXUIElementCreateSystemWide,
     };
-    use core_foundation::base::{CFType, TCFType};
-    use core_foundation::string::CFString;
-    use std::ptr;
 
     unsafe {
         let system_element = AXUIElementCreateSystemWide();
