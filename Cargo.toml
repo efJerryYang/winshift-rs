@@ -24,46 +24,8 @@ env_logger = "0.11.8"
 
 [features]
 default = []
+cargo-clippy = []
 
-[lints.clippy]
-# Performance lints
-inefficient_to_string = "warn"
-manual_string_new = "warn"
-string_add = "warn"
-string_add_assign = "warn"
-
-# Important restriction lints (selective)
-unimplemented = "warn"
-todo = "warn"
-panic = "warn"
-
-# Style lints (practical ones)
-wildcard_imports = "warn"
-missing_const_for_fn = "warn"
-
-# Cargo metadata
-cargo_common_metadata = "warn"
-
-# Allow some that are too strict for low-level system code
-multiple_crate_versions = "allow"
-enum_variant_names = "allow"
-doc_markdown = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-undocumented_unsafe_blocks = "allow"
-multiple_unsafe_ops_per_block = "allow"
-unwrap_used = "allow"
-expect_used = "allow"
-too_many_lines = "allow"
-needless_pass_by_value = "allow"
-items_after_statements = "allow"
-if_not_else = "allow"
-unnecessary_wraps = "allow"
-unused_self = "allow"
-match_same_arms = "allow"
-
-[lints.rust]
-missing_docs = "allow"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.58.0", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
@@ -78,6 +40,6 @@ x11 = { version = "2.21.0", features = ["xlib"] }
 cocoa = "0.26.0"
 core-foundation = "0.10.0"
 core-graphics = "0.24.0"
-objc = { git = "https://github.com/SSheldon/rust-objc.git", rev = "c8696b0cd1932fdf1b5b22c03af86f32a934f42f" }
+objc2 = "0.2.7"
 accessibility = "0.2.0"
 accessibility-sys = "0.2.0"

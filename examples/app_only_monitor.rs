@@ -1,7 +1,6 @@
 use std::sync::{Arc, RwLock};
 use winshift::{FocusChangeHandler, WindowFocusHook};
 
-
 struct AppOnlyHandler {
     current_app: Arc<RwLock<String>>,
     current_pid: Arc<RwLock<i32>>,
@@ -40,7 +39,6 @@ impl FocusChangeHandler for AppOnlyHandler {
         /* NO-OP */
     }
 }
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger - set RUST_LOG=debug to see library logs

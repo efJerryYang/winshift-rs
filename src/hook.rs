@@ -1,7 +1,8 @@
-use crate::error::WinshiftError;
 use std::sync::{Arc, RwLock};
 
 use log::{debug, trace};
+
+use crate::error::WinshiftError;
 
 /// Monitoring mode for selective event tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +53,7 @@ pub struct WindowHookConfig {
 /// - **Windows**: Event-driven using `SetWinEventHook` (currently not implemented)
 ///
 /// ## Monitoring Modes:
-/// - **Combined**: Monitors both application switches and window changes (default, required on macOS for proper window tracking)
+/// - **Combined**: Monitors both application switches and window changes (required on macOS for proper window tracking)
 /// - **`AppOnly`**: Monitors only application switches for optimal performance
 /// - **`WindowOnly`**: Monitors only window changes within the current application
 pub struct WindowFocusHook {
@@ -132,7 +133,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::PlatformError(
+            Err(WinshiftError::Platform(
                 "Unsupported platform".to_string(),
             ))
         }
@@ -165,7 +166,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::PlatformError(
+            Err(WinshiftError::Platform(
                 "Unsupported platform".to_string(),
             ))
         }
