@@ -149,9 +149,9 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                                 last_title, window_title
                                             );
                                             last_title = window_title.clone();
-                                                if let Ok(guard) = handler.read() {
-                                                    guard.on_window_change(window_title);
-                                                }
+                                            if let Ok(guard) = handler.read() {
+                                                guard.on_window_change(window_title);
+                                            }
                                         }
                                     }
                                 }
@@ -172,9 +172,9 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                                             last_title, window_title
                                         );
                                         last_title = window_title.clone();
-                                            if let Ok(guard) = handler.read() {
-                                                guard.on_window_change(window_title);
-                                            }
+                                        if let Ok(guard) = handler.read() {
+                                            guard.on_window_change(window_title);
+                                        }
                                     }
                                 }
                             }

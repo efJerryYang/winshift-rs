@@ -133,9 +133,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::Platform(
-                "Unsupported platform".to_string(),
-            ))
+            Err(WinshiftError::Platform("Unsupported platform".to_string()))
         }
     }
 
@@ -166,9 +164,7 @@ impl WindowFocusHook {
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
         {
             error!("Unsupported platform");
-            Err(WinshiftError::Platform(
-                "Unsupported platform".to_string(),
-            ))
+            Err(WinshiftError::Platform("Unsupported platform".to_string()))
         }
     }
 }
