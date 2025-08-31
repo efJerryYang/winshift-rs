@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::ffi;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use core_foundation::base::{CFType, TCFType};
@@ -28,7 +29,7 @@ extern "C" {}
 // TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
 // Controls whether we compute and emit embedded ActiveWindowInfo in callbacks
-static mut EMBED_ACTIVE_INFO: bool = false;
+static EMBED_ACTIVE_INFO: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn run_hook_with_config(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
@@ -38,9 +39,7 @@ pub(crate) fn run_hook_with_config(
         "Starting macOS hook with monitoring mode: {:?}",
         config.monitoring_mode
     );
-    unsafe {
-        EMBED_ACTIVE_INFO = config.embed_active_info;
-    }
+    EMBED_ACTIVE_INFO.store(config.embed_active_info, Ordering::Relaxed);
     run_accessibility_hook_with_mode(handler, config.monitoring_mode)
 }
 
@@ -68,6 +67,7 @@ use core_foundation::number::__CFNumber;
 const K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
 const K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
 const K_CGNULL_WINDOW_ID: u32 = 0;
+const INVALID_WINDOW_ID: u32 = u32::MAX;
 const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +109,7 @@ pub fn get_active_window_info() -> Result<ActiveWindowInfo, WinshiftError> {
     let mut info = ActiveWindowInfo {
         title: String::new(),
         app_name,
-        window_id: u32::MAX,
+        window_id: INVALID_WINDOW_ID,
         process_id: pid,
         bounds: WindowBounds {
             x: 0.0,
@@ -412,7 +412,7 @@ pub fn match_active_window(
 
     unsafe { CFRelease(info_arr) };
 
-    if info.window_id == u32::MAX {
+    if info.window_id == INVALID_WINDOW_ID {
         return Err(WinshiftError::MacOS("No qualifying window found".into()));
     }
     Ok(())
@@ -472,7 +472,7 @@ unsafe extern "C" fn window_focus_callback(
                 if let Ok(guard) = handler.read() {
                     guard.on_window_change(window_title.clone());
                     // Optionally emit embedded ActiveWindowInfo to avoid separate user calls
-                    if unsafe { EMBED_ACTIVE_INFO } {
+                    if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
                         if let Ok(info) = get_active_window_info() {
                             guard.on_window_change_info(info);
                         }
@@ -715,11 +715,12 @@ fn run_accessibility_hook(
                                             info!("Created AX observer for app PID: {}", pid);
 
                                             // Optionally gather full ActiveWindowInfo once
-                                            let maybe_info = if EMBED_ACTIVE_INFO {
-                                                get_active_window_info().ok()
-                                            } else {
-                                                None
-                                            };
+                                            let maybe_info =
+                                                if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
+                                                    get_active_window_info().ok()
+                                                } else {
+                                                    None
+                                                };
 
                                             // Notify app change
                                             if let Ok(guard) = handler.read() {
@@ -947,7 +948,7 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
                             debug!("Application switched to PID {} ({})", pid, app_name);
 
                             // Optionally attach ActiveWindowInfo to this app event
-                            let maybe_info = if EMBED_ACTIVE_INFO {
+                            let maybe_info = if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
                                 get_active_window_info().ok()
                             } else {
                                 None
@@ -1110,7 +1111,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
 
     unsafe {
         let observer_info = create_observer_for_current_app(&handler)?;
-        if EMBED_ACTIVE_INFO {
+        if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
             if let Ok(info) = get_active_window_info() {
                 if let Ok(guard) = handler.read() {
                     if !info.title.is_empty() {
