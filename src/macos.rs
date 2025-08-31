@@ -11,16 +11,9 @@ use std::ffi;
 use std::ptr;
 use std::sync::{Arc, RwLock};
 
-use accessibility_sys::kAXPositionAttribute;
-use accessibility_sys::kAXSizeAttribute;
-use accessibility_sys::kAXTitleAttribute;
-use accessibility_sys::AXUIElementRef;
-use cocoa::appkit::CGPoint;
 use core_foundation::base::{CFType, TCFType};
-use core_foundation::number::CFNumber;
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::CFString;
-use core_graphics::display::CGSize;
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
 use objc2::runtime;
