@@ -35,6 +35,14 @@ pub trait FocusChangeHandler: Send + Sync {
     /// # Arguments
     /// * `window_title` - The title of the newly focused window
     fn on_window_change(&self, window_title: String);
+
+    // Optional richer callbacks that embed full active window info (macOS only)
+    // Default no-ops to preserve backward compatibility and avoid overhead
+    #[cfg(target_os = "macos")]
+    fn on_app_change_info(&self, _info: crate::ActiveWindowInfo) {}
+
+    #[cfg(target_os = "macos")]
+    fn on_window_change_info(&self, _info: crate::ActiveWindowInfo) {}
 }
 
 /// Configuration for window monitoring behavior
@@ -43,6 +51,10 @@ pub struct WindowHookConfig {
     /// Monitoring mode to control which events are tracked
     /// Default: Combined (both apps and windows, required on macOS for proper window tracking)
     pub monitoring_mode: MonitoringMode,
+
+    /// When true, event callbacks will also emit embedded ActiveWindowInfo
+    /// (platform support currently on macOS). Off by default to minimize overhead.
+    pub embed_active_info: bool,
 }
 
 /// Main window focus monitoring hook
@@ -92,6 +104,7 @@ impl WindowFocusHook {
     pub fn app_only<H: FocusChangeHandler + 'static>(handler: H) -> Self {
         let config = WindowHookConfig {
             monitoring_mode: MonitoringMode::AppOnly,
+            embed_active_info: false,
         };
         Self::with_config(handler, config)
     }
@@ -100,6 +113,7 @@ impl WindowFocusHook {
     pub fn window_only<H: FocusChangeHandler + 'static>(handler: H) -> Self {
         let config = WindowHookConfig {
             monitoring_mode: MonitoringMode::WindowOnly,
+            embed_active_info: false,
         };
         Self::with_config(handler, config)
     }

@@ -14,7 +14,6 @@ use std::sync::{Arc, RwLock};
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::{CFString, CFStringRef};
-use libc;
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
 use objc2::runtime;
@@ -28,6 +27,8 @@ use crate::FocusChangeHandler;
 extern "C" {}
 // TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
+// Controls whether we compute and emit embedded ActiveWindowInfo in callbacks
+static mut EMBED_ACTIVE_INFO: bool = false;
 
 pub(crate) fn run_hook_with_config(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
@@ -37,6 +38,9 @@ pub(crate) fn run_hook_with_config(
         "Starting macOS hook with monitoring mode: {:?}",
         config.monitoring_mode
     );
+    unsafe {
+        EMBED_ACTIVE_INFO = config.embed_active_info;
+    }
     run_accessibility_hook_with_mode(handler, config.monitoring_mode)
 }
 
@@ -466,9 +470,13 @@ unsafe extern "C" fn window_focus_callback(
 
                 trace!("Acquiring handler read lock...");
                 if let Ok(guard) = handler.read() {
-                    trace!("Handler lock acquired, calling on_window_change...");
-                    guard.on_window_change(window_title);
-                    trace!("on_window_change completed");
+                    guard.on_window_change(window_title.clone());
+                    // Optionally emit embedded ActiveWindowInfo to avoid separate user calls
+                    if unsafe { EMBED_ACTIVE_INFO } {
+                        if let Ok(info) = get_active_window_info() {
+                            guard.on_window_change_info(info);
+                        }
+                    }
                 } else {
                     error!("Failed to acquire handler read lock");
                 }
@@ -523,6 +531,7 @@ fn run_accessibility_hook(
 
     info!("Accessibility permissions verified");
 
+    // Handler pointer for NSWorkspace observer glue
     let handler_ptr = Box::into_raw(Box::new(handler.clone()));
 
     static mut OBSERVERS: Option<HashMap<i32, ObserverInfo>> = None;
@@ -647,8 +656,27 @@ fn run_accessibility_hook(
                         if !app.is_null() {
                             trace!("Getting process identifier...");
                             let pid: i32 = msg_send![app, processIdentifier];
-                            let app_name = get_app_name_by_pid(pid)
-                                .unwrap_or_else(|| format!("Unknown (PID: {pid})"));
+                            // Use localizedName directly from the NSRunningApplication
+                            let app_name = {
+                                let localized_name: *mut Object = msg_send![app, localizedName];
+                                if !localized_name.is_null() {
+                                    let name_str: *const std::ffi::c_char =
+                                        msg_send![localized_name, UTF8String];
+                                    if !name_str.is_null() {
+                                        if let Ok(name) =
+                                            std::ffi::CStr::from_ptr(name_str).to_str()
+                                        {
+                                            name.to_string()
+                                        } else {
+                                            format!("Unknown (PID: {pid})")
+                                        }
+                                    } else {
+                                        format!("Unknown (PID: {pid})")
+                                    }
+                                } else {
+                                    format!("Unknown (PID: {pid})")
+                                }
+                            };
                             debug!("Application switched to PID {} ({})", pid, app_name);
 
                             trace!("Checking if observer already exists for PID {}...", pid);
@@ -686,29 +714,33 @@ fn run_accessibility_hook(
                                             observers.insert(pid, observer_info);
                                             info!("Created AX observer for app PID: {}", pid);
 
-                                            trace!("Notifying app change...");
+                                            // Optionally gather full ActiveWindowInfo once
+                                            let maybe_info = if EMBED_ACTIVE_INFO {
+                                                get_active_window_info().ok()
+                                            } else {
+                                                None
+                                            };
+
+                                            // Notify app change
                                             if let Ok(guard) = handler.read() {
-                                                trace!("Handler lock acquired, calling on_app_change...");
                                                 guard.on_app_change(pid, app_name.clone());
-                                                trace!("on_app_change completed");
+                                                if let Some(ref info) = maybe_info {
+                                                    guard.on_app_change_info(info.clone());
+                                                }
                                             }
 
-                                            trace!("Getting current window title...");
-                                            if let Some(title) = get_current_window_title() {
-                                                info!(
-                                                    "Current window in activated app: '{}'",
-                                                    title
-                                                );
-                                                trace!(
-                                                    "Acquiring handler lock for initial window..."
-                                                );
+                                            // Notify window change using either computed info or AX title
+                                            if let Some(info) = maybe_info {
                                                 if let Ok(guard) = handler.read() {
-                                                    trace!("Handler lock acquired, calling on_window_change...");
-                                                    guard.on_window_change(title);
-                                                    trace!("on_window_change completed");
+                                                    if !info.title.is_empty() {
+                                                        guard.on_window_change(info.title.clone());
+                                                    }
+                                                    guard.on_window_change_info(info);
                                                 }
-                                            } else {
-                                                trace!("No current window title available");
+                                            } else if let Some(title) = get_current_window_title() {
+                                                if let Ok(guard) = handler.read() {
+                                                    guard.on_window_change(title);
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -892,12 +924,40 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
 
                         if !app.is_null() {
                             let pid: i32 = msg_send![app, processIdentifier];
-                            let app_name = get_app_name_by_pid(pid)
-                                .unwrap_or_else(|| format!("Unknown (PID: {pid})"));
+                            let app_name = {
+                                let localized_name: *mut Object = msg_send![app, localizedName];
+                                if !localized_name.is_null() {
+                                    let name_str: *const std::ffi::c_char =
+                                        msg_send![localized_name, UTF8String];
+                                    if !name_str.is_null() {
+                                        if let Ok(name) =
+                                            std::ffi::CStr::from_ptr(name_str).to_str()
+                                        {
+                                            name.to_string()
+                                        } else {
+                                            format!("Unknown (PID: {pid})")
+                                        }
+                                    } else {
+                                        format!("Unknown (PID: {pid})")
+                                    }
+                                } else {
+                                    format!("Unknown (PID: {pid})")
+                                }
+                            };
                             debug!("Application switched to PID {} ({})", pid, app_name);
+
+                            // Optionally attach ActiveWindowInfo to this app event
+                            let maybe_info = if EMBED_ACTIVE_INFO {
+                                get_active_window_info().ok()
+                            } else {
+                                None
+                            };
 
                             if let Ok(guard) = handler.read() {
                                 guard.on_app_change(pid, app_name);
+                                if let Some(info) = maybe_info {
+                                    guard.on_app_change_info(info);
+                                }
                             }
                         }
                     }
@@ -942,8 +1002,22 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
 
         if !frontmost_app.is_null() {
             let initial_pid: i32 = msg_send![frontmost_app, processIdentifier];
-            let app_name = get_app_name_by_pid(initial_pid)
-                .unwrap_or_else(|| format!("Unknown (PID: {initial_pid})"));
+            let app_name = {
+                let localized_name: *mut Object = msg_send![frontmost_app, localizedName];
+                if !localized_name.is_null() {
+                    let name_str: *const std::ffi::c_char = msg_send![localized_name, UTF8String];
+                    if !name_str.is_null() {
+                        std::ffi::CStr::from_ptr(name_str)
+                            .to_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| format!("Unknown (PID: {initial_pid})"))
+                    } else {
+                        format!("Unknown (PID: {initial_pid})")
+                    }
+                } else {
+                    format!("Unknown (PID: {initial_pid})")
+                }
+            };
             info!("Initial app: {} (PID: {})", app_name, initial_pid);
             if let Ok(guard) = handler.read() {
                 guard.on_app_change(initial_pid, app_name);
@@ -1036,9 +1110,16 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
 
     unsafe {
         let observer_info = create_observer_for_current_app(&handler)?;
-
-        if let Some(title) = get_current_window_title() {
-            info!("Initial window: '{}'", title);
+        if EMBED_ACTIVE_INFO {
+            if let Ok(info) = get_active_window_info() {
+                if let Ok(guard) = handler.read() {
+                    if !info.title.is_empty() {
+                        guard.on_window_change(info.title.clone());
+                    }
+                    guard.on_window_change_info(info);
+                }
+            }
+        } else if let Some(title) = get_current_window_title() {
             if let Ok(guard) = handler.read() {
                 guard.on_window_change(title);
             }
@@ -1076,41 +1157,25 @@ fn get_app_name_by_pid(pid: i32) -> Option<String> {
     use objc2::{class, msg_send};
 
     unsafe {
-        let workspace_class = class!(NSWorkspace);
-        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
-
-        if workspace.is_null() {
+        // Prefer direct lookup rather than scanning all running apps
+        let nsra = class!(NSRunningApplication);
+        let app: *mut Object = msg_send![nsra, runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
             return None;
         }
-
-        let running_apps: *mut runtime::Object = msg_send![workspace, runningApplications];
-
-        if running_apps.is_null() {
+        let localized_name: *mut Object = msg_send![app, localizedName];
+        if localized_name.is_null() {
             return None;
         }
-
-        let count: usize = msg_send![running_apps, count];
-        for i in 0..count {
-            let app: *mut runtime::Object = msg_send![running_apps, objectAtIndex: i];
-            if !app.is_null() {
-                let app_pid: i32 = msg_send![app, processIdentifier];
-                if app_pid == pid {
-                    let localized_name: *mut Object = msg_send![app, localizedName];
-                    if !localized_name.is_null() {
-                        let name_str: *const std::ffi::c_char =
-                            msg_send![localized_name, UTF8String];
-                        if !name_str.is_null() {
-                            if let Ok(name) = std::ffi::CStr::from_ptr(name_str).to_str() {
-                                return Some(name.to_string());
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
+        let name_str: *const std::ffi::c_char = msg_send![localized_name, UTF8String];
+        if name_str.is_null() {
+            return None;
         }
+        std::ffi::CStr::from_ptr(name_str)
+            .to_str()
+            .map(|s| s.to_string())
+            .ok()
     }
-    None
 }
 
 fn get_proc_path_by_pid(pid: i32) -> Option<String> {
