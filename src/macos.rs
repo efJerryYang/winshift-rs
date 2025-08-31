@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::{CFString, CFStringRef};
+use libc;
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
 use objc2::runtime;
@@ -47,6 +48,12 @@ extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, relativeToWindow: u32) -> *mut ffi::c_void;
 }
 
+// libproc for resolving executable path from PID
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pidpath(pid: i32, buffer: *mut libc::c_char, buffersize: u32) -> i32;
+}
+
 use core_foundation::array::CFArray;
 use core_foundation::boolean::{kCFBooleanTrue, CFBooleanRef};
 use core_foundation::dictionary::CFDictionary;
@@ -57,6 +64,7 @@ use core_foundation::number::__CFNumber;
 const K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
 const K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
 const K_CGNULL_WINDOW_ID: u32 = 0;
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WindowBounds {
@@ -73,6 +81,7 @@ pub struct ActiveWindowInfo {
     pub window_id: u32,
     pub process_id: i32,
     pub bounds: WindowBounds,
+    pub proc_path: String,
 }
 
 // Get the current active window info by first asking AX for the focused
@@ -104,6 +113,7 @@ pub fn get_active_window_info() -> Result<ActiveWindowInfo, WinshiftError> {
             width: 0.0,
             height: 0.0,
         },
+        proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
     };
 
     unsafe {
@@ -1097,6 +1107,27 @@ fn get_app_name_by_pid(pid: i32) -> Option<String> {
                     }
                     break;
                 }
+            }
+        }
+    }
+    None
+}
+
+fn get_proc_path_by_pid(pid: i32) -> Option<String> {
+    unsafe {
+        let mut buf = vec![0 as libc::c_char; PROC_PIDPATHINFO_MAXSIZE];
+        let ret = proc_pidpath(pid, buf.as_mut_ptr(), PROC_PIDPATHINFO_MAXSIZE as u32);
+        if ret > 0 {
+            // Ensure null-terminated string
+            let c_str = std::ffi::CStr::from_ptr(buf.as_ptr());
+            if let Ok(raw) = c_str.to_str() {
+                // Try to canonicalize to resolve symlinks
+                if let Ok(real) = std::fs::canonicalize(raw) {
+                    if let Some(s) = real.to_str() {
+                        return Some(s.to_string());
+                    }
+                }
+                return Some(raw.to_string());
             }
         }
     }
