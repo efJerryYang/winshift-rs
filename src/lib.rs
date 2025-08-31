@@ -61,5 +61,7 @@ pub use env_logger;
 
 #[cfg(target_os = "macos")]
 pub use macos::stop_hook;
+#[cfg(target_os = "macos")]
+pub use macos::{get_active_window_info, ActiveWindowInfo, WindowBounds};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

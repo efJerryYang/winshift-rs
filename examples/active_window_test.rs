@@ -3,7 +3,7 @@
 
 use accessibility_sys::*;
 use core_foundation::array::CFArray;
-use core_foundation::base::{CFType, ItemRef, TCFType};
+use core_foundation::base::{CFType, TCFType};
 use core_foundation::boolean::{kCFBooleanTrue, CFBooleanRef};
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::dictionary::__CFDictionary;
@@ -275,6 +275,9 @@ fn extract_window_fields(window_dict: &CFDictionary) -> WindowFields {
 
 fn debug_compare_with_ax(window_dict: &CFDictionary, target_pid: i32, win_id: u32) {
     println!("CG/AX Comparison for selected window ({}):", win_id);
+    // Numeric CG bounds to compare later
+    let mut cg_bounds_numeric: Option<(f64, f64, f64, f64)> = None;
+
     // Print CG-side details (name/title and bounds)
     unsafe {
         let name_key = CFString::from_static_string("kCGWindowName");
@@ -292,6 +295,21 @@ fn debug_compare_with_ax(window_dict: &CFDictionary, target_pid: i32, win_id: u3
         if !bounds_ptr.is_null() {
             let cf_value = CFType::wrap_under_get_rule(bounds_ptr);
             println!("  CG Bounds: {:#?}", cf_value);
+            // Attempt numeric extraction
+            let dict = CFDictionary::<CFString, CFNumber>::wrap_under_get_rule(
+                bounds_ptr as *const __CFDictionary,
+            );
+            let x_key = CFString::from_static_string("X");
+            let y_key = CFString::from_static_string("Y");
+            let w_key = CFString::from_static_string("Width");
+            let h_key = CFString::from_static_string("Height");
+            let x = dict.get(x_key.as_concrete_TypeRef() as *const _).to_f64();
+            let y = dict.get(y_key.as_concrete_TypeRef() as *const _).to_f64();
+            let w = dict.get(w_key.as_concrete_TypeRef() as *const _).to_f64();
+            let h = dict.get(h_key.as_concrete_TypeRef() as *const _).to_f64();
+            if let (Some(x), Some(y), Some(w), Some(h)) = (x, y, w, h) {
+                cg_bounds_numeric = Some((x, y, w, h));
+            }
         } else {
             println!("  CG Bounds: <none>");
         }
@@ -344,9 +362,32 @@ fn debug_compare_with_ax(window_dict: &CFDictionary, target_pid: i32, win_id: u3
             std::ptr::from_mut::<*mut std::ffi::c_void>(&mut pos_ptr)
                 .cast::<*const std::ffi::c_void>(),
         );
+        #[repr(C)]
+        struct CGPoint64 {
+            x: f64,
+            y: f64,
+        }
+        #[repr(C)]
+        struct CGSize64 {
+            width: f64,
+            height: f64,
+        }
+
+        let mut ax_pos_num: Option<(f64, f64)> = None;
         if !pos_ptr.is_null() {
             let cf_value = CFType::wrap_under_create_rule(pos_ptr);
             println!("  AX Position: {:#?}", cf_value);
+            if AXValueGetType(pos_ptr as AXValueRef) == kAXValueTypeCGPoint {
+                let mut p = CGPoint64 { x: 0.0, y: 0.0 };
+                let ok = AXValueGetValue(
+                    pos_ptr as AXValueRef,
+                    kAXValueTypeCGPoint,
+                    &mut p as *mut _ as *mut std::ffi::c_void,
+                );
+                if ok {
+                    ax_pos_num = Some((p.x, p.y));
+                }
+            }
         } else {
             println!("  AX Position: <none>");
         }
@@ -360,11 +401,42 @@ fn debug_compare_with_ax(window_dict: &CFDictionary, target_pid: i32, win_id: u3
             std::ptr::from_mut::<*mut std::ffi::c_void>(&mut size_ptr)
                 .cast::<*const std::ffi::c_void>(),
         );
+        let mut ax_size_num: Option<(f64, f64)> = None;
         if !size_ptr.is_null() {
             let cf_value = CFType::wrap_under_create_rule(size_ptr);
             println!("  AX Size: {:#?}", cf_value);
+            if AXValueGetType(size_ptr as AXValueRef) == kAXValueTypeCGSize {
+                let mut s = CGSize64 {
+                    width: 0.0,
+                    height: 0.0,
+                };
+                let ok = AXValueGetValue(
+                    size_ptr as AXValueRef,
+                    kAXValueTypeCGSize,
+                    &mut s as *mut _ as *mut std::ffi::c_void,
+                );
+                if ok {
+                    ax_size_num = Some((s.width, s.height));
+                }
+            }
         } else {
             println!("  AX Size: <none>");
+        }
+
+        // Compare numeric bounds if available
+        let tol = 1.0f64;
+        if let (Some((cg_x, cg_y, cg_w, cg_h)), Some((ax_x, ax_y)), Some((ax_w, ax_h))) =
+            (cg_bounds_numeric, ax_pos_num, ax_size_num)
+        {
+            let dx = (cg_x - ax_x).abs();
+            let dy = (cg_y - ax_y).abs();
+            let dw = (cg_w - ax_w).abs();
+            let dh = (cg_h - ax_h).abs();
+            let matches = dx <= tol && dy <= tol && dw <= tol && dh <= tol;
+            println!(
+                "  Bounds match (<= {:.1}px tol): {}  diffs: dx={:.3} dy={:.3} dw={:.3} dh={:.3}",
+                tol, matches, dx, dy, dw, dh
+            );
         }
     }
 }

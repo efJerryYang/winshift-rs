@@ -39,6 +39,355 @@ pub(crate) fn run_hook_with_config(
     run_accessibility_hook_with_mode(handler, config.monitoring_mode)
 }
 
+// ===== Active window info (CG + AX comparison) =====
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGWindowListCreate(option: u32, relativeToWindow: u32) -> *mut ffi::c_void;
+    fn CGWindowListCreateDescriptionFromArray(windowArray: *mut ffi::c_void) -> *mut ffi::c_void;
+    fn CFRelease(cf: *const ffi::c_void);
+}
+
+use core_foundation::array::CFArray;
+use core_foundation::boolean::{kCFBooleanTrue, CFBooleanRef};
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::dictionary::__CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::number::__CFNumber;
+use core_foundation::string::CFStringRef;
+
+const K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+const K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+const K_CGNULL_WINDOW_ID: u32 = 0;
+
+#[derive(Debug, Clone, Copy)]
+pub struct WindowBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWindowInfo {
+    pub title: String,
+    pub app_name: String,
+    pub window_id: u32,
+    pub process_id: i32,
+    pub bounds: WindowBounds,
+}
+
+pub fn get_active_window_info(pid: i32, app_name: &str) -> Result<ActiveWindowInfo, WinshiftError> {
+    // Try to read AX focused window info for this PID (title + bounds)
+    let mut ax_title: Option<String> = None;
+    let mut ax_bounds: Option<WindowBounds> = None;
+
+    unsafe {
+        if accessibility_sys::AXIsProcessTrusted() {
+            let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
+
+            // Focused window element
+            let mut focused_window: *mut ffi::c_void = ptr::null_mut();
+            let focused_attr =
+                CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
+            let res = accessibility_sys::AXUIElementCopyAttributeValue(
+                app_element,
+                focused_attr.as_concrete_TypeRef(),
+                std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
+                    .cast::<*const ffi::c_void>(),
+            );
+            if res == 0 && !focused_window.is_null() {
+                // Title
+                let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
+                let title_attr = CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    title_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+                if !title_ptr.is_null() {
+                    let cf_value = CFType::wrap_under_create_rule(title_ptr);
+                    if let Some(s) = cf_value.downcast::<CFString>() {
+                        ax_title = Some(s.to_string());
+                    }
+                }
+
+                // Position
+                let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
+                let pos_attr =
+                    CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    pos_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+
+                // Size
+                let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
+                let size_attr = CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    size_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+
+                if !pos_ptr.is_null() && !size_ptr.is_null() {
+                    // Extract numeric using AXValueGetValue
+                    #[repr(C)]
+                    struct CGPoint64 {
+                        x: f64,
+                        y: f64,
+                    }
+                    #[repr(C)]
+                    struct CGSize64 {
+                        width: f64,
+                        height: f64,
+                    }
+                    if accessibility_sys::AXValueGetType(pos_ptr as accessibility_sys::AXValueRef)
+                        == accessibility_sys::kAXValueTypeCGPoint
+                        && accessibility_sys::AXValueGetType(
+                            size_ptr as accessibility_sys::AXValueRef,
+                        ) == accessibility_sys::kAXValueTypeCGSize
+                    {
+                        let mut p = CGPoint64 { x: 0.0, y: 0.0 };
+                        let mut s = CGSize64 {
+                            width: 0.0,
+                            height: 0.0,
+                        };
+                        let ok_p = accessibility_sys::AXValueGetValue(
+                            pos_ptr as accessibility_sys::AXValueRef,
+                            accessibility_sys::kAXValueTypeCGPoint,
+                            &mut p as *mut _ as *mut ffi::c_void,
+                        );
+                        let ok_s = accessibility_sys::AXValueGetValue(
+                            size_ptr as accessibility_sys::AXValueRef,
+                            accessibility_sys::kAXValueTypeCGSize,
+                            &mut s as *mut _ as *mut ffi::c_void,
+                        );
+                        if ok_p && ok_s {
+                            ax_bounds = Some(WindowBounds {
+                                x: p.x,
+                                y: p.y,
+                                width: s.width,
+                                height: s.height,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Enumerate CG windows and find a match
+    let window_descriptions = unsafe {
+        let opts = K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY | K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS;
+        let ids = CGWindowListCreate(opts, K_CGNULL_WINDOW_ID);
+        if ids.is_null() {
+            return Err(WinshiftError::MacOS("CGWindowListCreate failed".into()));
+        }
+        let desc = CGWindowListCreateDescriptionFromArray(ids);
+        CFRelease(ids);
+        if desc.is_null() {
+            return Err(WinshiftError::MacOS(
+                "CGWindowListCreateDescriptionFromArray failed".into(),
+            ));
+        }
+        desc
+    };
+
+    let descriptions_array = unsafe {
+        CFArray::<CFDictionary>::wrap_under_get_rule(
+            window_descriptions as *const core_foundation::array::__CFArray,
+        )
+    };
+
+    // Helper to extract fields from a CG window dict
+    #[derive(Debug, Clone)]
+    struct Fields {
+        pid: Option<i32>,
+        layer: Option<i32>,
+        onscreen: Option<bool>,
+        alpha: Option<f64>,
+        window_number: Option<u32>,
+        title: Option<String>,
+        bounds: Option<WindowBounds>,
+    }
+
+    fn extract_fields(d: &CFDictionary) -> Fields {
+        unsafe {
+            let pid_key = CFString::from_static_string("kCGWindowOwnerPID");
+            let layer_key = CFString::from_static_string("kCGWindowLayer");
+            let onscreen_key = CFString::from_static_string("kCGWindowIsOnscreen");
+            let alpha_key = CFString::from_static_string("kCGWindowAlpha");
+            let window_id_key = CFString::from_static_string("kCGWindowNumber");
+            let window_name_key = CFString::from_static_string("kCGWindowName");
+            let bounds_key = CFString::from_static_string("kCGWindowBounds");
+
+            let pid_ptr = *d.get(pid_key.as_concrete_TypeRef() as *const _);
+            let layer_ptr =
+                *d.get(layer_key.as_concrete_TypeRef() as *const _) as *const __CFNumber;
+            let onscreen_ref =
+                *d.get(onscreen_key.as_concrete_TypeRef() as *const _) as CFBooleanRef;
+            let alpha_ptr =
+                *d.get(alpha_key.as_concrete_TypeRef() as *const _) as *const __CFNumber;
+            let window_id_ptr =
+                *d.get(window_id_key.as_concrete_TypeRef() as *const _) as *const __CFNumber;
+            let window_name_ptr = *d.get(window_name_key.as_concrete_TypeRef() as *const _);
+            let bounds_ptr = *d.get(bounds_key.as_concrete_TypeRef() as *const _);
+
+            let pid = if !pid_ptr.is_null() {
+                CFNumber::wrap_under_get_rule(pid_ptr as *const __CFNumber).to_i32()
+            } else {
+                None
+            };
+            let layer = if !layer_ptr.is_null() {
+                CFNumber::wrap_under_get_rule(layer_ptr).to_i32()
+            } else {
+                None
+            };
+            let onscreen = if !onscreen_ref.is_null() {
+                Some(onscreen_ref == kCFBooleanTrue)
+            } else {
+                None
+            };
+            let alpha = if !alpha_ptr.is_null() {
+                CFNumber::wrap_under_get_rule(alpha_ptr).to_f64()
+            } else {
+                None
+            };
+            let window_number = if !window_id_ptr.is_null() {
+                CFNumber::wrap_under_get_rule(window_id_ptr)
+                    .to_i32()
+                    .map(|v| v as u32)
+            } else {
+                None
+            };
+            let title = if !window_name_ptr.is_null() {
+                let s = CFString::wrap_under_get_rule(window_name_ptr as CFStringRef);
+                Some(s.to_string())
+            } else {
+                None
+            };
+            let bounds = if !bounds_ptr.is_null() {
+                let dict = CFDictionary::<CFString, CFNumber>::wrap_under_get_rule(
+                    bounds_ptr as *const __CFDictionary,
+                );
+                let x_key = CFString::from_static_string("X");
+                let y_key = CFString::from_static_string("Y");
+                let w_key = CFString::from_static_string("Width");
+                let h_key = CFString::from_static_string("Height");
+                let x = dict.get(x_key.as_concrete_TypeRef() as *const _).to_f64();
+                let y = dict.get(y_key.as_concrete_TypeRef() as *const _).to_f64();
+                let w = dict.get(w_key.as_concrete_TypeRef() as *const _).to_f64();
+                let h = dict.get(h_key.as_concrete_TypeRef() as *const _).to_f64();
+                match (x, y, w, h) {
+                    (Some(x), Some(y), Some(w), Some(h)) => Some(WindowBounds {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            Fields {
+                pid,
+                layer,
+                onscreen,
+                alpha,
+                window_number,
+                title,
+                bounds,
+            }
+        }
+    }
+
+    let count = descriptions_array.len();
+    let mut best: Option<Fields> = None;
+
+    // First pass: strict filters and exact title match if AX title is known
+    for i in 0..count {
+        if let Some(d) = descriptions_array.get(i) {
+            let f = extract_fields(&d);
+            let pid_ok = f.pid == Some(pid);
+            let layer_ok = f.layer == Some(0);
+            let onscreen_ok = f.onscreen == Some(true);
+            let alpha_ok = f.alpha.map(|a| a > 0.0).unwrap_or(false);
+            if !(pid_ok && layer_ok && onscreen_ok && alpha_ok) {
+                continue;
+            }
+            if let (Some(ax_t), Some(ref cg_t)) = (&ax_title, &f.title) {
+                if ax_t == cg_t {
+                    // Optional bounds refine: prefer best bounds match
+                    let matches_bounds = match (ax_bounds, f.bounds) {
+                        (Some(axb), Some(cgb)) => {
+                            let tol = 1.0;
+                            (axb.x - cgb.x).abs() <= tol
+                                && (axb.y - cgb.y).abs() <= tol
+                                && (axb.width - cgb.width).abs() <= tol
+                                && (axb.height - cgb.height).abs() <= tol
+                        }
+                        _ => false,
+                    };
+                    best = Some(f.clone());
+                    if matches_bounds {
+                        break;
+                    }
+                }
+            } else if best.is_none() {
+                // No AX title available; keep first passing candidate as fallback
+                best = Some(f.clone());
+            }
+        }
+    }
+
+    // If no match by title, fallback to first strict-filter candidate
+    if best.is_none() {
+        for i in 0..count {
+            if let Some(d) = descriptions_array.get(i) {
+                let f = extract_fields(&d);
+                let pid_ok = f.pid == Some(pid);
+                let layer_ok = f.layer == Some(0);
+                let onscreen_ok = f.onscreen == Some(true);
+                let alpha_ok = f.alpha.map(|a| a > 0.0).unwrap_or(false);
+                if pid_ok && layer_ok && onscreen_ok && alpha_ok {
+                    best = Some(f);
+                    break;
+                }
+            }
+        }
+    }
+
+    unsafe { CFRelease(window_descriptions) };
+
+    let f = best.ok_or_else(|| WinshiftError::MacOS("No qualifying window found".into()))?;
+    let title = ax_title
+        .or(f.title.clone())
+        .unwrap_or_else(|| String::new());
+    let bounds = f
+        .bounds
+        .or(ax_bounds)
+        .ok_or_else(|| WinshiftError::MacOS("Missing window bounds".into()))?;
+
+    let window_id = f.window_number.ok_or_else(|| {
+        WinshiftError::MacOS("Missing kCGWindowNumber for qualifying window".into())
+    })?;
+
+    Ok(ActiveWindowInfo {
+        title,
+        app_name: app_name.to_string(),
+        window_id,
+        process_id: pid,
+        bounds,
+    })
+}
+
 unsafe extern "C" fn window_focus_callback(
     observer: accessibility_sys::AXObserverRef,
     element: accessibility_sys::AXUIElementRef,
