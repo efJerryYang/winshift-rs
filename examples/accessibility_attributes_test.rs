@@ -4,11 +4,8 @@
 use accessibility_sys::*;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::CFString;
-use objc2::runtime;
 use objc2::{class, msg_send, sel, sel_impl};
-use std::any::Any;
 use std::ffi;
-use std::fmt::format;
 use std::ptr;
 
 #[link(name = "AppKit", kind = "framework")]

@@ -2,7 +2,6 @@
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::{Arc, RwLock};
     use winshift::{env_logger, FocusChangeHandler, WindowFocusHook, WindowHookConfig};
 
     env_logger::init();
@@ -38,8 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let handler = Handler;
-    let mut config = WindowHookConfig::default();
-    config.embed_active_info = true; // opt-in to richer payloads
+    let config = WindowHookConfig {
+        embed_active_info: true,
+        ..Default::default()
+    };
 
     let hook = WindowFocusHook::with_config(handler, config);
 

@@ -16,6 +16,8 @@ use objc2::{class, msg_send, sel, sel_impl};
 use std::ffi;
 
 #[link(name = "AppKit", kind = "framework")]
+extern "C" {}
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGWindowListCreate(option: u32, relativeToWindow: u32) -> *mut ffi::c_void;
