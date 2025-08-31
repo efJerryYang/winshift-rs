@@ -9,11 +9,12 @@
 use std::collections::HashMap;
 use std::ffi;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
-use core_foundation::string::CFString;
+use core_foundation::string::{CFString, CFStringRef};
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
 use objc2::runtime;
@@ -27,6 +28,8 @@ use crate::FocusChangeHandler;
 extern "C" {}
 // TODO: Make these thread-safe
 static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
+// Controls whether we compute and emit embedded ActiveWindowInfo in callbacks
+static EMBED_ACTIVE_INFO: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn run_hook_with_config(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
@@ -36,7 +39,383 @@ pub(crate) fn run_hook_with_config(
         "Starting macOS hook with monitoring mode: {:?}",
         config.monitoring_mode
     );
+    EMBED_ACTIVE_INFO.store(config.embed_active_info, Ordering::Relaxed);
     run_accessibility_hook_with_mode(handler, config.monitoring_mode)
+}
+
+// ===== Active window info (CG + AX comparison) =====
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CFRelease(cf: *const ffi::c_void);
+    fn CGWindowListCopyWindowInfo(option: u32, relativeToWindow: u32) -> *mut ffi::c_void;
+}
+
+// libproc for resolving executable path from PID
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pidpath(pid: i32, buffer: *mut libc::c_char, buffersize: u32) -> i32;
+}
+
+use core_foundation::array::CFArray;
+use core_foundation::boolean::{kCFBooleanTrue, CFBooleanRef};
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::dictionary::__CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::number::__CFNumber;
+
+const K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+const K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+const K_CGNULL_WINDOW_ID: u32 = 0;
+const INVALID_WINDOW_ID: u32 = u32::MAX;
+const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+
+#[derive(Debug, Clone, Copy)]
+pub struct WindowBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWindowInfo {
+    pub title: String,
+    pub app_name: String,
+    pub window_id: u32,
+    pub process_id: i32,
+    pub bounds: WindowBounds,
+    pub proc_path: String,
+}
+
+// Get the current active window info by first asking AX for the focused
+// window's PID/title/bounds, then matching a CoreGraphics window to retrieve
+// its stable window_id. This function does not require inputs.
+pub fn get_active_window_info() -> Result<ActiveWindowInfo, WinshiftError> {
+    // Find frontmost application (PID + name)
+    let (pid, app_name) = unsafe {
+        let workspace_class = class!(NSWorkspace);
+        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
+        let frontmost_app: *mut runtime::Object = msg_send![workspace, frontmostApplication];
+        if frontmost_app.is_null() {
+            return Err(WinshiftError::MacOS("No frontmost application".into()));
+        }
+        let pid: i32 = msg_send![frontmost_app, processIdentifier];
+        let name = get_app_name_by_pid(pid).unwrap_or_else(|| String::from("Unknown"));
+        (pid, name)
+    };
+
+    // Build a partial ActiveWindowInfo with AX data when available.
+    let mut info = ActiveWindowInfo {
+        title: String::new(),
+        app_name,
+        window_id: INVALID_WINDOW_ID,
+        process_id: pid,
+        bounds: WindowBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        },
+        proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
+    };
+
+    unsafe {
+        if accessibility_sys::AXIsProcessTrusted() {
+            let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
+
+            // Focused window element
+            let mut focused_window: *mut ffi::c_void = ptr::null_mut();
+            let focused_attr =
+                CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
+            let res = accessibility_sys::AXUIElementCopyAttributeValue(
+                app_element,
+                focused_attr.as_concrete_TypeRef(),
+                std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
+                    .cast::<*const ffi::c_void>(),
+            );
+            if res == 0 && !focused_window.is_null() {
+                // Title
+                let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
+                let title_attr = CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    title_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+                if !title_ptr.is_null() {
+                    let cf_value = CFType::wrap_under_create_rule(title_ptr);
+                    if let Some(s) = cf_value.downcast::<CFString>() {
+                        info.title = s.to_string();
+                    }
+                }
+
+                // Position
+                let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
+                let pos_attr =
+                    CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    pos_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+
+                // Size
+                let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
+                let size_attr = CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
+                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                    focused_window as _,
+                    size_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
+                        .cast::<*const ffi::c_void>(),
+                );
+
+                if !pos_ptr.is_null() && !size_ptr.is_null() {
+                    // Extract numeric using AXValueGetValue
+                    #[repr(C)]
+                    struct CGPoint64 {
+                        x: f64,
+                        y: f64,
+                    }
+                    #[repr(C)]
+                    struct CGSize64 {
+                        width: f64,
+                        height: f64,
+                    }
+                    if accessibility_sys::AXValueGetType(pos_ptr as accessibility_sys::AXValueRef)
+                        == accessibility_sys::kAXValueTypeCGPoint
+                        && accessibility_sys::AXValueGetType(
+                            size_ptr as accessibility_sys::AXValueRef,
+                        ) == accessibility_sys::kAXValueTypeCGSize
+                    {
+                        let mut p = CGPoint64 { x: 0.0, y: 0.0 };
+                        let mut s = CGSize64 {
+                            width: 0.0,
+                            height: 0.0,
+                        };
+                        let ok_p = accessibility_sys::AXValueGetValue(
+                            pos_ptr as accessibility_sys::AXValueRef,
+                            accessibility_sys::kAXValueTypeCGPoint,
+                            &mut p as *mut _ as *mut ffi::c_void,
+                        );
+                        let ok_s = accessibility_sys::AXValueGetValue(
+                            size_ptr as accessibility_sys::AXValueRef,
+                            accessibility_sys::kAXValueTypeCGSize,
+                            &mut s as *mut _ as *mut ffi::c_void,
+                        );
+                        if ok_p && ok_s {
+                            info.bounds = WindowBounds {
+                                x: p.x,
+                                y: p.y,
+                                width: s.width,
+                                height: s.height,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Now match via CoreGraphics enumeration; by default, don't check title/bounds.
+    match_active_window(
+        &mut info,
+        MatchOptions {
+            match_title: false,
+            match_bounds: false,
+            bounds_tolerance: 1.0,
+        },
+    )?;
+    Ok(info)
+}
+
+// Lazy field accessors for CG window dictionaries
+fn dict_get_i32(d: &CFDictionary, key: &'static str) -> Option<i32> {
+    unsafe {
+        let k = CFString::from_static_string(key);
+        let v = *d.get(k.as_concrete_TypeRef() as *const _);
+        if v.is_null() {
+            return None;
+        }
+        let n = v as *const __CFNumber;
+        if n.is_null() {
+            return None;
+        }
+        CFNumber::wrap_under_get_rule(n).to_i32()
+    }
+}
+
+fn dict_get_bool(d: &CFDictionary, key: &'static str) -> Option<bool> {
+    unsafe {
+        let k = CFString::from_static_string(key);
+        let v = *d.get(k.as_concrete_TypeRef() as *const _);
+        if v.is_null() {
+            return None;
+        }
+        let b = v as CFBooleanRef;
+        Some(b == kCFBooleanTrue)
+    }
+}
+
+fn dict_get_f64(d: &CFDictionary, key: &'static str) -> Option<f64> {
+    unsafe {
+        let k = CFString::from_static_string(key);
+        let v = *d.get(k.as_concrete_TypeRef() as *const _);
+        if v.is_null() {
+            return None;
+        }
+        let n = v as *const __CFNumber;
+        if n.is_null() {
+            return None;
+        }
+        CFNumber::wrap_under_get_rule(n).to_f64()
+    }
+}
+
+fn dict_get_string(d: &CFDictionary, key: &'static str) -> Option<String> {
+    unsafe {
+        let k = CFString::from_static_string(key);
+        let v = *d.get(k.as_concrete_TypeRef() as *const _);
+        if v.is_null() {
+            return None;
+        }
+        let s = CFString::wrap_under_get_rule(v as CFStringRef);
+        Some(s.to_string())
+    }
+}
+
+fn dict_get_bounds(d: &CFDictionary) -> Option<WindowBounds> {
+    unsafe {
+        let bounds_key = CFString::from_static_string("kCGWindowBounds");
+        let ptr = *d.get(bounds_key.as_concrete_TypeRef() as *const _);
+        if ptr.is_null() {
+            return None;
+        }
+        let dict =
+            CFDictionary::<CFString, CFNumber>::wrap_under_get_rule(ptr as *const __CFDictionary);
+        let x = dict
+            .get(CFString::from_static_string("X").as_concrete_TypeRef() as *const _)
+            .to_f64();
+        let y = dict
+            .get(CFString::from_static_string("Y").as_concrete_TypeRef() as *const _)
+            .to_f64();
+        let w = dict
+            .get(CFString::from_static_string("Width").as_concrete_TypeRef() as *const _)
+            .to_f64();
+        let h = dict
+            .get(CFString::from_static_string("Height").as_concrete_TypeRef() as *const _)
+            .to_f64();
+        match (x, y, w, h) {
+            (Some(x), Some(y), Some(w), Some(h)) => Some(WindowBounds {
+                x,
+                y,
+                width: w,
+                height: h,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MatchOptions {
+    pub match_title: bool,
+    pub match_bounds: bool,
+    pub bounds_tolerance: f64,
+}
+
+pub fn match_active_window(
+    info: &mut ActiveWindowInfo,
+    opts: MatchOptions,
+) -> Result<(), WinshiftError> {
+    // Single CoreGraphics call: returns CFArray of window dictionaries
+    let info_arr = unsafe {
+        CGWindowListCopyWindowInfo(
+            K_CGWINDOW_LIST_OPTION_ON_SCREEN_ONLY | K_CGWINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
+            K_CGNULL_WINDOW_ID,
+        )
+    };
+    if info_arr.is_null() {
+        return Err(WinshiftError::MacOS(
+            "CGWindowListCopyWindowInfo failed".into(),
+        ));
+    }
+    let arr = unsafe {
+        CFArray::<CFDictionary>::wrap_under_get_rule(
+            info_arr as *const core_foundation::array::__CFArray,
+        )
+    };
+
+    for i in 0..arr.len() {
+        if let Some(d) = arr.get(i) {
+            // Fast reject order: layer -> pid -> onscreen -> alpha
+            if dict_get_i32(&d, "kCGWindowLayer") != Some(0) {
+                continue;
+            }
+            if dict_get_i32(&d, "kCGWindowOwnerPID") != Some(info.process_id) {
+                continue;
+            }
+            if dict_get_bool(&d, "kCGWindowIsOnscreen") != Some(true) {
+                continue;
+            }
+            if !dict_get_f64(&d, "kCGWindowAlpha")
+                .map(|a| a > 0.0)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            if opts.match_title && !info.title.is_empty() {
+                if let Some(cg_title) = dict_get_string(&d, "kCGWindowName") {
+                    if info.title != cg_title {
+                        continue;
+                    }
+                } else {
+                    // No CG title present; cannot match title -> skip title check
+                }
+            }
+            if opts.match_bounds && (info.bounds.width > 0.0 || info.bounds.height > 0.0) {
+                if let Some(cb) = dict_get_bounds(&d) {
+                    let tol = opts.bounds_tolerance;
+                    if (info.bounds.x - cb.x).abs() > tol
+                        || (info.bounds.y - cb.y).abs() > tol
+                        || (info.bounds.width - cb.width).abs() > tol
+                        || (info.bounds.height - cb.height).abs() > tol
+                    {
+                        continue;
+                    }
+                } else {
+                    // No CG bounds present; cannot match bounds -> skip bounds check
+                }
+            }
+
+            if let Some(id_i32) = dict_get_i32(&d, "kCGWindowNumber") {
+                info.window_id = id_i32 as u32;
+                // Fill missing fields by default if available from CG
+                if info.title.is_empty() {
+                    if let Some(cg_title) = dict_get_string(&d, "kCGWindowName") {
+                        info.title = cg_title;
+                    }
+                }
+                if (info.bounds.width == 0.0 && info.bounds.height == 0.0)
+                    || (info.bounds.width.is_nan() || info.bounds.height.is_nan())
+                {
+                    if let Some(cb) = dict_get_bounds(&d) {
+                        info.bounds = cb;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    unsafe { CFRelease(info_arr) };
+
+    if info.window_id == INVALID_WINDOW_ID {
+        return Err(WinshiftError::MacOS("No qualifying window found".into()));
+    }
+    Ok(())
 }
 
 unsafe extern "C" fn window_focus_callback(
@@ -91,9 +470,13 @@ unsafe extern "C" fn window_focus_callback(
 
                 trace!("Acquiring handler read lock...");
                 if let Ok(guard) = handler.read() {
-                    trace!("Handler lock acquired, calling on_window_change...");
-                    guard.on_window_change(window_title);
-                    trace!("on_window_change completed");
+                    guard.on_window_change(window_title.clone());
+                    // Optionally emit embedded ActiveWindowInfo to avoid separate user calls
+                    if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
+                        if let Ok(info) = get_active_window_info() {
+                            guard.on_window_change_info(info);
+                        }
+                    }
                 } else {
                     error!("Failed to acquire handler read lock");
                 }
@@ -148,6 +531,7 @@ fn run_accessibility_hook(
 
     info!("Accessibility permissions verified");
 
+    // Handler pointer for NSWorkspace observer glue
     let handler_ptr = Box::into_raw(Box::new(handler.clone()));
 
     static mut OBSERVERS: Option<HashMap<i32, ObserverInfo>> = None;
@@ -272,8 +656,27 @@ fn run_accessibility_hook(
                         if !app.is_null() {
                             trace!("Getting process identifier...");
                             let pid: i32 = msg_send![app, processIdentifier];
-                            let app_name = get_app_name_by_pid(pid)
-                                .unwrap_or_else(|| format!("Unknown (PID: {pid})"));
+                            // Use localizedName directly from the NSRunningApplication
+                            let app_name = {
+                                let localized_name: *mut Object = msg_send![app, localizedName];
+                                if !localized_name.is_null() {
+                                    let name_str: *const std::ffi::c_char =
+                                        msg_send![localized_name, UTF8String];
+                                    if !name_str.is_null() {
+                                        if let Ok(name) =
+                                            std::ffi::CStr::from_ptr(name_str).to_str()
+                                        {
+                                            name.to_string()
+                                        } else {
+                                            format!("Unknown (PID: {pid})")
+                                        }
+                                    } else {
+                                        format!("Unknown (PID: {pid})")
+                                    }
+                                } else {
+                                    format!("Unknown (PID: {pid})")
+                                }
+                            };
                             debug!("Application switched to PID {} ({})", pid, app_name);
 
                             trace!("Checking if observer already exists for PID {}...", pid);
@@ -311,29 +714,34 @@ fn run_accessibility_hook(
                                             observers.insert(pid, observer_info);
                                             info!("Created AX observer for app PID: {}", pid);
 
-                                            trace!("Notifying app change...");
+                                            // Optionally gather full ActiveWindowInfo once
+                                            let maybe_info =
+                                                if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
+                                                    get_active_window_info().ok()
+                                                } else {
+                                                    None
+                                                };
+
+                                            // Notify app change
                                             if let Ok(guard) = handler.read() {
-                                                trace!("Handler lock acquired, calling on_app_change...");
                                                 guard.on_app_change(pid, app_name.clone());
-                                                trace!("on_app_change completed");
+                                                if let Some(ref info) = maybe_info {
+                                                    guard.on_app_change_info(info.clone());
+                                                }
                                             }
 
-                                            trace!("Getting current window title...");
-                                            if let Some(title) = get_current_window_title() {
-                                                info!(
-                                                    "Current window in activated app: '{}'",
-                                                    title
-                                                );
-                                                trace!(
-                                                    "Acquiring handler lock for initial window..."
-                                                );
+                                            // Notify window change using either computed info or AX title
+                                            if let Some(info) = maybe_info {
                                                 if let Ok(guard) = handler.read() {
-                                                    trace!("Handler lock acquired, calling on_window_change...");
-                                                    guard.on_window_change(title);
-                                                    trace!("on_window_change completed");
+                                                    if !info.title.is_empty() {
+                                                        guard.on_window_change(info.title.clone());
+                                                    }
+                                                    guard.on_window_change_info(info);
                                                 }
-                                            } else {
-                                                trace!("No current window title available");
+                                            } else if let Some(title) = get_current_window_title() {
+                                                if let Ok(guard) = handler.read() {
+                                                    guard.on_window_change(title);
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -517,12 +925,40 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
 
                         if !app.is_null() {
                             let pid: i32 = msg_send![app, processIdentifier];
-                            let app_name = get_app_name_by_pid(pid)
-                                .unwrap_or_else(|| format!("Unknown (PID: {pid})"));
+                            let app_name = {
+                                let localized_name: *mut Object = msg_send![app, localizedName];
+                                if !localized_name.is_null() {
+                                    let name_str: *const std::ffi::c_char =
+                                        msg_send![localized_name, UTF8String];
+                                    if !name_str.is_null() {
+                                        if let Ok(name) =
+                                            std::ffi::CStr::from_ptr(name_str).to_str()
+                                        {
+                                            name.to_string()
+                                        } else {
+                                            format!("Unknown (PID: {pid})")
+                                        }
+                                    } else {
+                                        format!("Unknown (PID: {pid})")
+                                    }
+                                } else {
+                                    format!("Unknown (PID: {pid})")
+                                }
+                            };
                             debug!("Application switched to PID {} ({})", pid, app_name);
+
+                            // Optionally attach ActiveWindowInfo to this app event
+                            let maybe_info = if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
+                                get_active_window_info().ok()
+                            } else {
+                                None
+                            };
 
                             if let Ok(guard) = handler.read() {
                                 guard.on_app_change(pid, app_name);
+                                if let Some(info) = maybe_info {
+                                    guard.on_app_change_info(info);
+                                }
                             }
                         }
                     }
@@ -567,8 +1003,22 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
 
         if !frontmost_app.is_null() {
             let initial_pid: i32 = msg_send![frontmost_app, processIdentifier];
-            let app_name = get_app_name_by_pid(initial_pid)
-                .unwrap_or_else(|| format!("Unknown (PID: {initial_pid})"));
+            let app_name = {
+                let localized_name: *mut Object = msg_send![frontmost_app, localizedName];
+                if !localized_name.is_null() {
+                    let name_str: *const std::ffi::c_char = msg_send![localized_name, UTF8String];
+                    if !name_str.is_null() {
+                        std::ffi::CStr::from_ptr(name_str)
+                            .to_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| format!("Unknown (PID: {initial_pid})"))
+                    } else {
+                        format!("Unknown (PID: {initial_pid})")
+                    }
+                } else {
+                    format!("Unknown (PID: {initial_pid})")
+                }
+            };
             info!("Initial app: {} (PID: {})", app_name, initial_pid);
             if let Ok(guard) = handler.read() {
                 guard.on_app_change(initial_pid, app_name);
@@ -661,9 +1111,16 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
 
     unsafe {
         let observer_info = create_observer_for_current_app(&handler)?;
-
-        if let Some(title) = get_current_window_title() {
-            info!("Initial window: '{}'", title);
+        if EMBED_ACTIVE_INFO.load(Ordering::Relaxed) {
+            if let Ok(info) = get_active_window_info() {
+                if let Ok(guard) = handler.read() {
+                    if !info.title.is_empty() {
+                        guard.on_window_change(info.title.clone());
+                    }
+                    guard.on_window_change_info(info);
+                }
+            }
+        } else if let Some(title) = get_current_window_title() {
             if let Ok(guard) = handler.read() {
                 guard.on_window_change(title);
             }
@@ -701,37 +1158,42 @@ fn get_app_name_by_pid(pid: i32) -> Option<String> {
     use objc2::{class, msg_send};
 
     unsafe {
-        let workspace_class = class!(NSWorkspace);
-        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
-
-        if workspace.is_null() {
+        // Prefer direct lookup rather than scanning all running apps
+        let nsra = class!(NSRunningApplication);
+        let app: *mut Object = msg_send![nsra, runningApplicationWithProcessIdentifier: pid];
+        if app.is_null() {
             return None;
         }
-
-        let running_apps: *mut runtime::Object = msg_send![workspace, runningApplications];
-
-        if running_apps.is_null() {
+        let localized_name: *mut Object = msg_send![app, localizedName];
+        if localized_name.is_null() {
             return None;
         }
+        let name_str: *const std::ffi::c_char = msg_send![localized_name, UTF8String];
+        if name_str.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(name_str)
+            .to_str()
+            .map(|s| s.to_string())
+            .ok()
+    }
+}
 
-        let count: usize = msg_send![running_apps, count];
-        for i in 0..count {
-            let app: *mut runtime::Object = msg_send![running_apps, objectAtIndex: i];
-            if !app.is_null() {
-                let app_pid: i32 = msg_send![app, processIdentifier];
-                if app_pid == pid {
-                    let localized_name: *mut Object = msg_send![app, localizedName];
-                    if !localized_name.is_null() {
-                        let name_str: *const std::ffi::c_char =
-                            msg_send![localized_name, UTF8String];
-                        if !name_str.is_null() {
-                            if let Ok(name) = std::ffi::CStr::from_ptr(name_str).to_str() {
-                                return Some(name.to_string());
-                            }
-                        }
+fn get_proc_path_by_pid(pid: i32) -> Option<String> {
+    unsafe {
+        let mut buf = vec![0 as libc::c_char; PROC_PIDPATHINFO_MAXSIZE];
+        let ret = proc_pidpath(pid, buf.as_mut_ptr(), PROC_PIDPATHINFO_MAXSIZE as u32);
+        if ret > 0 {
+            // Ensure null-terminated string
+            let c_str = std::ffi::CStr::from_ptr(buf.as_ptr());
+            if let Ok(raw) = c_str.to_str() {
+                // Try to canonicalize to resolve symlinks
+                if let Ok(real) = std::fs::canonicalize(raw) {
+                    if let Some(s) = real.to_str() {
+                        return Some(s.to_string());
                     }
-                    break;
                 }
+                return Some(raw.to_string());
             }
         }
     }
