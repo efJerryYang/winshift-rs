@@ -12,9 +12,9 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use core_foundation::base::{CFType, TCFType};
+use core_foundation::base::{CFGetTypeID, CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
-use core_foundation::string::{CFString, CFStringRef};
+use core_foundation::string::{CFString, CFStringGetTypeID, CFStringRef};
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
 use objc2::runtime;
@@ -280,6 +280,11 @@ fn dict_get_string(d: &CFDictionary, key: &'static str) -> Option<String> {
         if v.is_null() {
             return None;
         }
+
+        if CFGetTypeID(v) != CFStringGetTypeID() {
+            return None;
+        }
+
         let s = CFString::wrap_under_get_rule(v as CFStringRef);
         Some(s.to_string())
     }
