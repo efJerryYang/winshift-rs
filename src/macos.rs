@@ -276,6 +276,11 @@ fn dict_get_f64(d: &CFDictionary, key: &'static str) -> Option<f64> {
 fn dict_get_string(d: &CFDictionary, key: &'static str) -> Option<String> {
     unsafe {
         let k = CFString::from_static_string(key);
+
+        if !d.contains_key(&(k.as_concrete_TypeRef() as *const _)) {
+            return None;
+        }
+
         let v = *d.get(k.as_concrete_TypeRef() as *const _);
         if v.is_null() {
             return None;
