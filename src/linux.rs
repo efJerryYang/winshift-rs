@@ -3,12 +3,11 @@
 //! This implementation uses `static mut` variables which are not thread-safe.
 //! It assumes single-threaded usage on the main thread only.
 //!
-//! TODO: Replace `static mut INTERRUPT_PIPE` with thread-safe alternative
 //! TODO: Consider thread-safe X11 event handling
 
 use std::ffi::CStr;
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use libc::{c_char, c_int, c_uchar, c_ulong, c_void, close, pipe, read, write, EINTR};
 use libc::{fd_set, select, FD_SET, FD_ZERO};
@@ -18,31 +17,96 @@ use x11::xlib;
 use crate::error::WinshiftError;
 use crate::FocusChangeHandler;
 
-// TODO: Make this thread-safe (e.g. using lazy_static with Mutex)
-static mut INTERRUPT_PIPE: [RawFd; 2] = [-1, -1];
+#[derive(Clone, Default)]
+pub struct HookStopHandle {
+    inner: Arc<HookStopState>,
+}
+
+#[derive(Default)]
+struct HookStopState {
+    write_fd: Mutex<Option<RawFd>>,
+}
+
+impl HookStopHandle {
+    pub(crate) fn register_pipe(&self, write_fd: RawFd) {
+        *self.inner.write_fd.lock().unwrap() = Some(write_fd);
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.inner.write_fd.lock().unwrap() = None;
+    }
+
+    pub fn stop(&self) -> Result<(), WinshiftError> {
+        if let Some(fd) = *self.inner.write_fd.lock().unwrap() {
+            let buf = [0u8; 1];
+            let written = unsafe { write(fd, buf.as_ptr() as *const c_void, 1) };
+            if written == 1 {
+                return Ok(());
+            }
+            return Err(WinshiftError::Stop);
+        }
+        Err(WinshiftError::Stop)
+    }
+}
+
+impl HookStopState {
+    fn new() -> Self {
+        Self {
+            write_fd: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for HookStopState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static GLOBAL_STOP_HANDLE: Mutex<Option<HookStopHandle>> = Mutex::new(None);
+
+fn install_global_stop_handle(handle: &HookStopHandle) {
+    *GLOBAL_STOP_HANDLE.lock().unwrap() = Some(handle.clone());
+}
+
+fn clear_global_stop_handle() {
+    *GLOBAL_STOP_HANDLE.lock().unwrap() = None;
+}
 
 pub(crate) fn run_hook_with_config(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
     _config: &crate::hook::WindowHookConfig,
+    stop_handle: HookStopHandle,
 ) -> Result<(), WinshiftError> {
-    run_hook(handler)
+    run_hook(handler, stop_handle)
 }
 
-fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+fn run_hook(
+    handler: Arc<RwLock<dyn FocusChangeHandler>>,
+    stop_handle: HookStopHandle,
+) -> Result<(), WinshiftError> {
     debug!("Starting Linux hook");
     unsafe {
+        let mut interrupt_pipe = [-1; 2];
         // Create the self-pipe
-        if pipe(INTERRUPT_PIPE.as_mut_ptr()) != 0 {
+        if pipe(interrupt_pipe.as_mut_ptr()) != 0 {
             error!("Failed to create interrupt pipe");
             return Err(WinshiftError::Initialization);
         }
         trace!("Interrupt pipe created");
 
+        let read_fd = interrupt_pipe[0];
+        let write_fd = interrupt_pipe[1];
+        stop_handle.register_pipe(write_fd);
+        install_global_stop_handle(&stop_handle);
+
         let display = xlib::XOpenDisplay(std::ptr::null());
         if display.is_null() {
             error!("Failed to open X11 display");
-            close(INTERRUPT_PIPE[0]);
-            close(INTERRUPT_PIPE[1]);
+            close(read_fd);
+            close(write_fd);
+            stop_handle.clear();
+            clear_global_stop_handle();
             return Err(WinshiftError::Initialization);
         }
         debug!("X11 display opened successfully");
@@ -75,9 +139,9 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
         let mut in_fds: fd_set = std::mem::zeroed();
         FD_ZERO(&mut in_fds);
         FD_SET(x11_fd, &mut in_fds);
-        FD_SET(INTERRUPT_PIPE[0], &mut in_fds);
+        FD_SET(read_fd, &mut in_fds);
 
-        let max_fd = x11_fd.max(INTERRUPT_PIPE[0]) + 1;
+        let max_fd = x11_fd.max(read_fd) + 1;
 
         loop {
             trace!("Waiting for X11 events or interrupt signal");
@@ -91,10 +155,10 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
                 std::ptr::null_mut(),
             ) > 0
             {
-                if libc::FD_ISSET(INTERRUPT_PIPE[0], &read_fds) {
+                if libc::FD_ISSET(read_fd, &read_fds) {
                     debug!("Received interrupt signal");
                     let mut buf = [0u8; 1];
-                    read(INTERRUPT_PIPE[0], buf.as_mut_ptr() as *mut c_void, 1);
+                    read(read_fd, buf.as_mut_ptr() as *mut c_void, 1);
                     break;
                 }
 
@@ -196,27 +260,26 @@ fn run_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), Winshift
         debug!("X11 display closed");
 
         // Close the self-pipe
-        close(INTERRUPT_PIPE[0]);
-        close(INTERRUPT_PIPE[1]);
+        close(read_fd);
+        close(write_fd);
         trace!("Interrupt pipe closed");
     }
+
+    stop_handle.clear();
+    clear_global_stop_handle();
 
     debug!("Linux hook stopped");
     Ok(())
 }
 
+#[deprecated(note = "Use WindowFocusHook::stop instead")]
 pub fn stop_hook() -> Result<(), WinshiftError> {
-    debug!("Attempting to stop Linux hook");
-    unsafe {
-        // Send interrupt signal through the pipe
-        let buf = [0u8; 1];
-        if write(INTERRUPT_PIPE[1], buf.as_ptr() as *const c_void, 1) != 1 {
-            error!("Failed to send interrupt signal");
-            return Err(WinshiftError::Stop);
-        }
+    debug!("Attempting to stop Linux hook via global handle");
+    if let Some(handle) = GLOBAL_STOP_HANDLE.lock().unwrap().clone() {
+        handle.stop()
+    } else {
+        Err(WinshiftError::Stop)
     }
-    debug!("Linux hook stop signal sent");
-    Ok(())
 }
 
 unsafe fn get_active_window(

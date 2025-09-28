@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
     use winshift::{env_logger, FocusChangeHandler, WindowFocusHook, WindowHookConfig};
 
     env_logger::init();
@@ -42,11 +43,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let hook = WindowFocusHook::with_config(handler, config);
+    let hook = Arc::new(WindowFocusHook::with_config(handler, config));
+    let stop_handle = hook.clone();
 
     // Allow Ctrl+C to stop
     let _ = ctrlc::set_handler(move || {
-        let _ = winshift::stop_hook();
+        let _ = stop_handle.stop();
     });
 
     hook.run()?;

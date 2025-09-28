@@ -4,13 +4,12 @@
 //! It assumes single-threaded usage on the main thread only.
 //!
 //! TODO: Replace `static mut` with thread-safe alternatives (Mutex/RwLock)
-//! TODO: Implement hook-specific stop methods instead of global stop
 
 use std::collections::HashMap;
 use std::ffi;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use core_foundation::base::{CFGetTypeID, CFType, TCFType};
 use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
@@ -31,16 +30,55 @@ static mut CURRENT_RUN_LOOP: Option<CFRunLoop> = None;
 // Controls whether we compute and emit embedded ActiveWindowInfo in callbacks
 static EMBED_ACTIVE_INFO: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Default)]
+pub struct HookStopHandle {
+    inner: Arc<HookStopState>,
+}
+
+#[derive(Default)]
+struct HookStopState {
+    run_loop: Mutex<Option<CFRunLoop>>,
+}
+
+impl HookStopHandle {
+    pub(crate) fn set_run_loop(&self, run_loop: &CFRunLoop) {
+        *self.inner.run_loop.lock().unwrap() = Some(run_loop.clone());
+    }
+
+    pub(crate) fn clear(&self) {
+        *self.inner.run_loop.lock().unwrap() = None;
+    }
+
+    pub fn stop(&self) -> Result<(), WinshiftError> {
+        if let Some(run_loop) = self.inner.run_loop.lock().unwrap().clone() {
+            run_loop.stop();
+            return Ok(());
+        }
+        Err(WinshiftError::Stop)
+    }
+}
+
+static GLOBAL_STOP_HANDLE: Mutex<Option<HookStopHandle>> = Mutex::new(None);
+
+fn install_global_stop_handle(handle: &HookStopHandle) {
+    *GLOBAL_STOP_HANDLE.lock().unwrap() = Some(handle.clone());
+}
+
+fn clear_global_stop_handle() {
+    *GLOBAL_STOP_HANDLE.lock().unwrap() = None;
+}
+
 pub(crate) fn run_hook_with_config(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
     config: &crate::hook::WindowHookConfig,
+    stop_handle: HookStopHandle,
 ) -> Result<(), WinshiftError> {
     trace!(
         "Starting macOS hook with monitoring mode: {:?}",
         config.monitoring_mode
     );
     EMBED_ACTIVE_INFO.store(config.embed_active_info, Ordering::Relaxed);
-    run_accessibility_hook_with_mode(handler, config.monitoring_mode)
+    run_accessibility_hook_with_mode(handler, config.monitoring_mode, stop_handle)
 }
 
 // ===== Active window info (CG + AX comparison) =====
@@ -512,18 +550,20 @@ struct ObserverInfo {
 fn run_accessibility_hook_with_mode(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
     mode: crate::hook::MonitoringMode,
+    stop_handle: HookStopHandle,
 ) -> Result<(), WinshiftError> {
     use crate::hook::MonitoringMode;
 
     match mode {
-        MonitoringMode::Combined => run_accessibility_hook(handler),
-        MonitoringMode::AppOnly => run_app_only_hook(handler),
-        MonitoringMode::WindowOnly => run_window_only_hook(handler),
+        MonitoringMode::Combined => run_accessibility_hook(handler, stop_handle),
+        MonitoringMode::AppOnly => run_app_only_hook(handler, stop_handle),
+        MonitoringMode::WindowOnly => run_window_only_hook(handler, stop_handle),
     }
 }
 
 fn run_accessibility_hook(
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
+    stop_handle: HookStopHandle,
 ) -> Result<(), WinshiftError> {
     use accessibility_sys::{
         kAXFocusedWindowChangedNotification, AXIsProcessTrusted, AXObserverAddNotification,
@@ -858,7 +898,7 @@ fn run_accessibility_hook(
         setup_nsworkspace_notifications(handler_ptr)?;
 
         info!("Event-driven NSWorkspace monitoring active");
-        run_cfrunloop();
+        run_cfrunloop(&stop_handle);
 
         if let Some(observers) = (&raw mut OBSERVERS).as_mut().unwrap() {
             let run_loop = CFRunLoop::get_current();
@@ -877,7 +917,10 @@ fn run_accessibility_hook(
     Ok(())
 }
 
-fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+fn run_app_only_hook(
+    handler: Arc<RwLock<dyn FocusChangeHandler>>,
+    stop_handle: HookStopHandle,
+) -> Result<(), WinshiftError> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
     use objc2::declare::ClassDecl;
@@ -1036,7 +1079,7 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
         }
 
         setup_nsworkspace_notifications_only(handler_ptr)?;
-        run_cfrunloop();
+        run_cfrunloop(&stop_handle);
         let _ = Box::from_raw(handler_ptr);
         trace!("App-only hook stopped");
     }
@@ -1044,7 +1087,10 @@ fn run_app_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(),
     Ok(())
 }
 
-fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<(), WinshiftError> {
+fn run_window_only_hook(
+    handler: Arc<RwLock<dyn FocusChangeHandler>>,
+    stop_handle: HookStopHandle,
+) -> Result<(), WinshiftError> {
     use accessibility_sys::{
         kAXFocusedWindowChangedNotification, AXIsProcessTrusted, AXObserverAddNotification,
         AXObserverCallback, AXObserverCreate, AXObserverGetRunLoopSource,
@@ -1136,7 +1182,7 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
             }
         }
 
-        run_cfrunloop();
+        run_cfrunloop(&stop_handle);
 
         let run_loop = CFRunLoop::get_current();
         run_loop.remove_source(&observer_info.run_loop_source, kCFRunLoopDefaultMode);
@@ -1147,13 +1193,15 @@ fn run_window_only_hook(handler: Arc<RwLock<dyn FocusChangeHandler>>) -> Result<
     Ok(())
 }
 
-fn run_cfrunloop() {
+fn run_cfrunloop(stop_handle: &HookStopHandle) {
     info!("Getting current CFRunLoop");
 
     let run_loop = CFRunLoop::get_current();
     unsafe {
         CURRENT_RUN_LOOP = Some(run_loop.clone());
     }
+    stop_handle.set_run_loop(&run_loop);
+    install_global_stop_handle(stop_handle);
 
     info!("CFRunLoop starting");
     CFRunLoop::run_current();
@@ -1162,6 +1210,8 @@ fn run_cfrunloop() {
     unsafe {
         CURRENT_RUN_LOOP = None;
     }
+    stop_handle.clear();
+    clear_global_stop_handle();
 }
 
 fn get_app_name_by_pid(pid: i32) -> Option<String> {
@@ -1263,20 +1313,13 @@ fn get_current_window_title() -> Option<String> {
     }
 }
 
+#[deprecated(note = "Use WindowFocusHook::stop instead")]
 pub fn stop_hook() -> Result<(), WinshiftError> {
-    info!("=== STOP_HOOK CALLED ====");
-    trace!("Stopping macOS hook");
-
-    unsafe {
-        if let Some(ref run_loop) = CURRENT_RUN_LOOP {
-            info!("Found CFRunLoop, calling stop()...");
-            run_loop.stop();
-            info!("CFRunLoop::stop() called successfully");
-        } else {
-            warn!("No current CFRunLoop stored termination");
-        }
+    info!("macOS stop_hook invoked");
+    if let Some(handle) = GLOBAL_STOP_HANDLE.lock().unwrap().clone() {
+        handle.stop()
+    } else {
+        warn!("No active hook instance available to stop");
+        Err(WinshiftError::Stop)
     }
-
-    info!("=== STOP_HOOK COMPLETED ====");
-    Ok(())
 }

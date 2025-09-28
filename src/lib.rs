@@ -60,6 +60,7 @@ pub use log::{debug, error, info, trace, warn};
 pub use env_logger;
 
 #[cfg(target_os = "macos")]
+#[deprecated(note = "Use WindowFocusHook::stop on the hook instance instead")]
 pub use macos::stop_hook;
 #[cfg(target_os = "macos")]
 pub use macos::{

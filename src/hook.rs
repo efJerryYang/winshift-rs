@@ -4,6 +4,24 @@ use log::{debug, trace};
 
 use crate::error::WinshiftError;
 
+#[cfg(target_os = "linux")]
+use crate::linux::HookStopHandle as PlatformStopHandle;
+#[cfg(target_os = "macos")]
+use crate::macos::HookStopHandle as PlatformStopHandle;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[derive(Clone, Default)]
+struct PlatformStopHandle;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl PlatformStopHandle {
+    fn stop(&self) -> Result<(), WinshiftError> {
+        Err(WinshiftError::Platform(
+            "Unsupported platform: stop not implemented".to_string(),
+        ))
+    }
+}
+
 /// Monitoring mode for selective event tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitoringMode {
@@ -71,6 +89,7 @@ pub struct WindowHookConfig {
 pub struct WindowFocusHook {
     handler: Arc<RwLock<dyn FocusChangeHandler>>,
     config: WindowHookConfig,
+    stop_handle: PlatformStopHandle,
 }
 
 impl WindowFocusHook {
@@ -81,6 +100,7 @@ impl WindowFocusHook {
         Self {
             handler: Arc::new(RwLock::new(handler)),
             config: WindowHookConfig::default(),
+            stop_handle: PlatformStopHandle::default(),
         }
     }
 
@@ -97,6 +117,7 @@ impl WindowFocusHook {
         Self {
             handler: Arc::new(RwLock::new(handler)),
             config,
+            stop_handle: PlatformStopHandle::default(),
         }
     }
 
@@ -135,13 +156,21 @@ impl WindowFocusHook {
         #[cfg(target_os = "linux")]
         {
             trace!("Running on Linux platform");
-            crate::linux::run_hook_with_config(self.handler.clone(), &self.config)
+            crate::linux::run_hook_with_config(
+                self.handler.clone(),
+                &self.config,
+                self.stop_handle.clone(),
+            )
         }
 
         #[cfg(target_os = "macos")]
         {
             trace!("Running on macOS platform");
-            crate::macos::run_hook_with_config(self.handler.clone(), &self.config)
+            crate::macos::run_hook_with_config(
+                self.handler.clone(),
+                &self.config,
+                self.stop_handle.clone(),
+            )
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -155,30 +184,8 @@ impl WindowFocusHook {
     ///
     /// # Errors
     /// Returns `WinshiftError` if platform stop operation fails
-    pub fn stop() -> Result<(), WinshiftError> {
-        debug!("Stopping WindowFocusHook");
-        #[cfg(target_os = "windows")]
-        {
-            trace!("Stopping on Windows platform");
-            crate::windows::stop_hook()
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            trace!("Stopping on Linux platform");
-            crate::linux::stop_hook()
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            trace!("Stopping on macOS platform");
-            crate::macos::stop_hook()
-        }
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        {
-            error!("Unsupported platform");
-            Err(WinshiftError::Platform("Unsupported platform".to_string()))
-        }
+    pub fn stop(&self) -> Result<(), WinshiftError> {
+        debug!("Stopping WindowFocusHook instance");
+        self.stop_handle.stop()
     }
 }

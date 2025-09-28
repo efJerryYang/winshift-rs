@@ -59,8 +59,8 @@ fn main() -> Result<(), winshift::WinshiftError> {
     // Start monitoring (runs in current thread)
     hook.run()?;
     
-    // On macOS, you can stop with:
-    // winshift::stop_hook();
+    // On macOS, you can stop from another thread with:
+    // hook.stop()?;
     
     Ok(())
 }
@@ -112,7 +112,7 @@ See `examples/embed_info_monitor.rs` for a complete example.
 **Important Notes**:
 
 1. Handler must be thread-safe (use Arc/RwLock if needed)
-2. On macOS, call `stop_hook()` to clean up
+2. On macOS, call `WindowFocusHook::stop()` on the instance (e.g. from a signal handler)
 3. See [examples/](examples/) for complete implementations
 4. Linux uses same API but doesn't require combined tracking
 5. Note: Implementation uses unsafe code and assumes single-threaded usage for now
