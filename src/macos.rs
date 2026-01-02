@@ -1313,7 +1313,7 @@ fn get_current_window_title() -> Option<String> {
     }
 }
 
-#[deprecated(note = "Use WindowFocusHook::stop instead")]
+#[deprecated(note = "Use instance stop(); stop_hook is a legacy static fallback")]
 pub fn stop_hook() -> Result<(), WinshiftError> {
     info!("macOS stop_hook invoked");
     if let Some(handle) = GLOBAL_STOP_HANDLE.lock().unwrap().clone() {

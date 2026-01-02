@@ -272,7 +272,7 @@ fn run_hook(
     Ok(())
 }
 
-#[deprecated(note = "Use WindowFocusHook::stop instead")]
+#[deprecated(note = "Use instance stop(); stop_hook is a legacy static fallback")]
 pub fn stop_hook() -> Result<(), WinshiftError> {
     debug!("Attempting to stop Linux hook via global handle");
     if let Some(handle) = GLOBAL_STOP_HANDLE.lock().unwrap().clone() {
