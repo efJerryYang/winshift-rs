@@ -89,35 +89,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let handler = ExampleHandler::new();
-    let hook = WindowFocusHook::new(handler);
-
-    // Set up Ctrl+C handler with proper CFRunLoop termination
-    let hook_ref = Arc::new(RwLock::new(Some(hook)));
-    let hook_clone = hook_ref.clone();
+    let hook = Arc::new(WindowFocusHook::new(handler));
+    let stop_handle = hook.clone();
 
     ::ctrlc::set_handler(move || {
         println!("\nShutting down monitor...");
         eprintln!("[SIGNAL] Ctrl+C signal received!");
 
-        // Signal CFRunLoop to stop
-        winshift::stop_hook().expect("Failed to stop hook");
+        if let Err(err) = stop_handle.stop() {
+            eprintln!("Failed to stop hook: {err}");
+        }
 
         eprintln!("[SIGNAL] Stop signal sent, exiting signal handler");
     })?;
 
     // Run the monitor on main thread (required for NSWorkspace and Accessibility API)
-    if let Ok(guard) = hook_ref.read() {
-        if let Some(ref hook) = *guard {
-            if let Err(e) = hook.run() {
-                eprintln!("Error running hook: {e}");
-            }
-        }
-    }
-
-    // When hook.run() exits, clean up
-    println!("Monitor stopped.");
-    if let Ok(mut guard) = hook_clone.write() {
-        guard.take(); // Take ownership to clean up
+    if let Err(e) = hook.run() {
+        eprintln!("Error running hook: {e}");
     }
 
     println!("Monitor stopped.");

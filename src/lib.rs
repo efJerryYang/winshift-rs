@@ -60,6 +60,7 @@ pub use log::{debug, error, info, trace, warn};
 pub use env_logger;
 
 #[cfg(target_os = "macos")]
+#[allow(deprecated)]
 pub use macos::stop_hook;
 #[cfg(target_os = "macos")]
 pub use macos::{
