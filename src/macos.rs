@@ -16,6 +16,7 @@ use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::{CFString, CFStringGetTypeID, CFStringRef};
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
+use objc2::rc::autoreleasepool;
 use objc2::runtime;
 use objc2::runtime::{Object, Sel};
 use objc2::{class, msg_send, sel, sel_impl};
@@ -130,142 +131,151 @@ pub struct ActiveWindowInfo {
 // window's PID/title/bounds, then matching a CoreGraphics window to retrieve
 // its stable window_id. This function does not require inputs.
 pub fn get_active_window_info() -> Result<ActiveWindowInfo, WinshiftError> {
-    // Find frontmost application (PID + name)
-    let (pid, app_name) = unsafe {
-        let workspace_class = class!(NSWorkspace);
-        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
-        let frontmost_app: *mut runtime::Object = msg_send![workspace, frontmostApplication];
-        if frontmost_app.is_null() {
-            return Err(WinshiftError::MacOS("No frontmost application".into()));
-        }
-        let pid: i32 = msg_send![frontmost_app, processIdentifier];
-        let name = get_app_name_by_pid(pid).unwrap_or_else(|| String::from("Unknown"));
-        (pid, name)
-    };
+    autoreleasepool(|| {
+        // Find frontmost application (PID + name)
+        let (pid, app_name) = unsafe {
+            let workspace_class = class!(NSWorkspace);
+            let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
+            let frontmost_app: *mut runtime::Object = msg_send![workspace, frontmostApplication];
+            if frontmost_app.is_null() {
+                return Err(WinshiftError::MacOS("No frontmost application".into()));
+            }
+            let pid: i32 = msg_send![frontmost_app, processIdentifier];
+            let name = get_app_name_by_pid(pid).unwrap_or_else(|| String::from("Unknown"));
+            (pid, name)
+        };
 
-    // Build a partial ActiveWindowInfo with AX data when available.
-    let mut info = ActiveWindowInfo {
-        title: String::new(),
-        app_name,
-        window_id: INVALID_WINDOW_ID,
-        process_id: pid,
-        bounds: WindowBounds {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-        },
-        proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
-    };
+        // Build a partial ActiveWindowInfo with AX data when available.
+        let mut info = ActiveWindowInfo {
+            title: String::new(),
+            app_name,
+            window_id: INVALID_WINDOW_ID,
+            process_id: pid,
+            bounds: WindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
+        };
 
-    unsafe {
-        if accessibility_sys::AXIsProcessTrusted() {
-            let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
+        unsafe {
+            if accessibility_sys::AXIsProcessTrusted() {
+                let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
 
-            // Focused window element
-            let mut focused_window: *mut ffi::c_void = ptr::null_mut();
-            let focused_attr =
-                CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
-            let res = accessibility_sys::AXUIElementCopyAttributeValue(
-                app_element,
-                focused_attr.as_concrete_TypeRef(),
-                std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
-                    .cast::<*const ffi::c_void>(),
-            );
-            if res == 0 && !focused_window.is_null() {
-                // Title
-                let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
-                let title_attr = CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    title_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                let mut focused_window: *mut ffi::c_void = ptr::null_mut();
+                let focused_attr =
+                    CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
+                let res = accessibility_sys::AXUIElementCopyAttributeValue(
+                    app_element,
+                    focused_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
                         .cast::<*const ffi::c_void>(),
                 );
-                if !title_ptr.is_null() {
-                    let cf_value = CFType::wrap_under_create_rule(title_ptr);
-                    if let Some(s) = cf_value.downcast::<CFString>() {
-                        info.title = s.to_string();
-                    }
-                }
-
-                // Position
-                let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
-                let pos_attr =
-                    CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    pos_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
-                        .cast::<*const ffi::c_void>(),
-                );
-
-                // Size
-                let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
-                let size_attr = CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    size_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
-                        .cast::<*const ffi::c_void>(),
-                );
-
-                if !pos_ptr.is_null() && !size_ptr.is_null() {
-                    // Extract numeric using AXValueGetValue
-                    #[repr(C)]
-                    struct CGPoint64 {
-                        x: f64,
-                        y: f64,
-                    }
-                    #[repr(C)]
-                    struct CGSize64 {
-                        width: f64,
-                        height: f64,
-                    }
-                    if accessibility_sys::AXValueGetType(pos_ptr as accessibility_sys::AXValueRef)
-                        == accessibility_sys::kAXValueTypeCGPoint
-                        && accessibility_sys::AXValueGetType(
-                            size_ptr as accessibility_sys::AXValueRef,
-                        ) == accessibility_sys::kAXValueTypeCGSize
-                    {
-                        let mut p = CGPoint64 { x: 0.0, y: 0.0 };
-                        let mut s = CGSize64 {
-                            width: 0.0,
-                            height: 0.0,
-                        };
-                        let ok_p = accessibility_sys::AXValueGetValue(
-                            pos_ptr as accessibility_sys::AXValueRef,
-                            accessibility_sys::kAXValueTypeCGPoint,
-                            &mut p as *mut _ as *mut ffi::c_void,
-                        );
-                        let ok_s = accessibility_sys::AXValueGetValue(
-                            size_ptr as accessibility_sys::AXValueRef,
-                            accessibility_sys::kAXValueTypeCGSize,
-                            &mut s as *mut _ as *mut ffi::c_void,
-                        );
-                        if ok_p && ok_s {
-                            info.bounds = WindowBounds {
-                                x: p.x,
-                                y: p.y,
-                                width: s.width,
-                                height: s.height,
-                            };
+                if res == 0 && !focused_window.is_null() {
+                    let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let title_attr =
+                        CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        title_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+                    if !title_ptr.is_null() {
+                        let cf_value = CFType::wrap_under_create_rule(title_ptr);
+                        if let Some(s) = cf_value.downcast::<CFString>() {
+                            info.title = s.to_string();
                         }
                     }
+
+                    let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let pos_attr =
+                        CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        pos_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+
+                    let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let size_attr =
+                        CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        size_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+
+                    if !pos_ptr.is_null() && !size_ptr.is_null() {
+                        #[repr(C)]
+                        struct CGPoint64 {
+                            x: f64,
+                            y: f64,
+                        }
+                        #[repr(C)]
+                        struct CGSize64 {
+                            width: f64,
+                            height: f64,
+                        }
+                        if accessibility_sys::AXValueGetType(
+                            pos_ptr as accessibility_sys::AXValueRef,
+                        ) == accessibility_sys::kAXValueTypeCGPoint
+                            && accessibility_sys::AXValueGetType(
+                                size_ptr as accessibility_sys::AXValueRef,
+                            ) == accessibility_sys::kAXValueTypeCGSize
+                        {
+                            let mut p = CGPoint64 { x: 0.0, y: 0.0 };
+                            let mut s = CGSize64 {
+                                width: 0.0,
+                                height: 0.0,
+                            };
+                            let ok_p = accessibility_sys::AXValueGetValue(
+                                pos_ptr as accessibility_sys::AXValueRef,
+                                accessibility_sys::kAXValueTypeCGPoint,
+                                &mut p as *mut _ as *mut ffi::c_void,
+                            );
+                            let ok_s = accessibility_sys::AXValueGetValue(
+                                size_ptr as accessibility_sys::AXValueRef,
+                                accessibility_sys::kAXValueTypeCGSize,
+                                &mut s as *mut _ as *mut ffi::c_void,
+                            );
+                            if ok_p && ok_s {
+                                info.bounds = WindowBounds {
+                                    x: p.x,
+                                    y: p.y,
+                                    width: s.width,
+                                    height: s.height,
+                                };
+                            }
+                        }
+                    }
+
+                    if !pos_ptr.is_null() {
+                        CFRelease(pos_ptr);
+                    }
+                    if !size_ptr.is_null() {
+                        CFRelease(size_ptr);
+                    }
+                    CFRelease(focused_window);
                 }
+                CFRelease(app_element as *const ffi::c_void);
             }
         }
-    }
-    // Now match via CoreGraphics enumeration; by default, don't check title/bounds.
-    match_active_window(
-        &mut info,
-        MatchOptions {
-            match_title: false,
-            match_bounds: false,
-            bounds_tolerance: 1.0,
-        },
-    )?;
-    Ok(info)
+
+        match_active_window(
+            &mut info,
+            MatchOptions {
+                match_title: false,
+                match_bounds: false,
+                bounds_tolerance: 1.0,
+            },
+        )?;
+        Ok(info)
+    })
 }
 
 // Lazy field accessors for CG window dictionaries
