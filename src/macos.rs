@@ -16,8 +16,9 @@ use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::{CFString, CFStringGetTypeID, CFStringRef};
 use log::{debug, error, info, trace, warn};
 use objc2::declare::ClassDecl;
+use objc2::rc::autoreleasepool;
 use objc2::runtime;
-use objc2::runtime::{Object, Sel};
+use objc2::runtime::{Class, Object, Sel};
 use objc2::{class, msg_send, sel, sel_impl};
 
 use crate::error::WinshiftError;
@@ -130,142 +131,151 @@ pub struct ActiveWindowInfo {
 // window's PID/title/bounds, then matching a CoreGraphics window to retrieve
 // its stable window_id. This function does not require inputs.
 pub fn get_active_window_info() -> Result<ActiveWindowInfo, WinshiftError> {
-    // Find frontmost application (PID + name)
-    let (pid, app_name) = unsafe {
-        let workspace_class = class!(NSWorkspace);
-        let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
-        let frontmost_app: *mut runtime::Object = msg_send![workspace, frontmostApplication];
-        if frontmost_app.is_null() {
-            return Err(WinshiftError::MacOS("No frontmost application".into()));
-        }
-        let pid: i32 = msg_send![frontmost_app, processIdentifier];
-        let name = get_app_name_by_pid(pid).unwrap_or_else(|| String::from("Unknown"));
-        (pid, name)
-    };
+    autoreleasepool(|| {
+        // Find frontmost application (PID + name)
+        let (pid, app_name) = unsafe {
+            let workspace_class = class!(NSWorkspace);
+            let workspace: *mut runtime::Object = msg_send![workspace_class, sharedWorkspace];
+            let frontmost_app: *mut runtime::Object = msg_send![workspace, frontmostApplication];
+            if frontmost_app.is_null() {
+                return Err(WinshiftError::MacOS("No frontmost application".into()));
+            }
+            let pid: i32 = msg_send![frontmost_app, processIdentifier];
+            let name = get_app_name_by_pid(pid).unwrap_or_else(|| String::from("Unknown"));
+            (pid, name)
+        };
 
-    // Build a partial ActiveWindowInfo with AX data when available.
-    let mut info = ActiveWindowInfo {
-        title: String::new(),
-        app_name,
-        window_id: INVALID_WINDOW_ID,
-        process_id: pid,
-        bounds: WindowBounds {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-        },
-        proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
-    };
+        // Build a partial ActiveWindowInfo with AX data when available.
+        let mut info = ActiveWindowInfo {
+            title: String::new(),
+            app_name,
+            window_id: INVALID_WINDOW_ID,
+            process_id: pid,
+            bounds: WindowBounds {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            proc_path: get_proc_path_by_pid(pid).unwrap_or_default(),
+        };
 
-    unsafe {
-        if accessibility_sys::AXIsProcessTrusted() {
-            let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
+        unsafe {
+            if accessibility_sys::AXIsProcessTrusted() {
+                let app_element = accessibility_sys::AXUIElementCreateApplication(pid);
 
-            // Focused window element
-            let mut focused_window: *mut ffi::c_void = ptr::null_mut();
-            let focused_attr =
-                CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
-            let res = accessibility_sys::AXUIElementCopyAttributeValue(
-                app_element,
-                focused_attr.as_concrete_TypeRef(),
-                std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
-                    .cast::<*const ffi::c_void>(),
-            );
-            if res == 0 && !focused_window.is_null() {
-                // Title
-                let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
-                let title_attr = CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    title_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                let mut focused_window: *mut ffi::c_void = ptr::null_mut();
+                let focused_attr =
+                    CFString::from_static_string(accessibility_sys::kAXFocusedWindowAttribute);
+                let res = accessibility_sys::AXUIElementCopyAttributeValue(
+                    app_element,
+                    focused_attr.as_concrete_TypeRef(),
+                    std::ptr::from_mut::<*mut ffi::c_void>(&mut focused_window)
                         .cast::<*const ffi::c_void>(),
                 );
-                if !title_ptr.is_null() {
-                    let cf_value = CFType::wrap_under_create_rule(title_ptr);
-                    if let Some(s) = cf_value.downcast::<CFString>() {
-                        info.title = s.to_string();
-                    }
-                }
-
-                // Position
-                let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
-                let pos_attr =
-                    CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    pos_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
-                        .cast::<*const ffi::c_void>(),
-                );
-
-                // Size
-                let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
-                let size_attr = CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
-                let _ = accessibility_sys::AXUIElementCopyAttributeValue(
-                    focused_window as _,
-                    size_attr.as_concrete_TypeRef(),
-                    std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
-                        .cast::<*const ffi::c_void>(),
-                );
-
-                if !pos_ptr.is_null() && !size_ptr.is_null() {
-                    // Extract numeric using AXValueGetValue
-                    #[repr(C)]
-                    struct CGPoint64 {
-                        x: f64,
-                        y: f64,
-                    }
-                    #[repr(C)]
-                    struct CGSize64 {
-                        width: f64,
-                        height: f64,
-                    }
-                    if accessibility_sys::AXValueGetType(pos_ptr as accessibility_sys::AXValueRef)
-                        == accessibility_sys::kAXValueTypeCGPoint
-                        && accessibility_sys::AXValueGetType(
-                            size_ptr as accessibility_sys::AXValueRef,
-                        ) == accessibility_sys::kAXValueTypeCGSize
-                    {
-                        let mut p = CGPoint64 { x: 0.0, y: 0.0 };
-                        let mut s = CGSize64 {
-                            width: 0.0,
-                            height: 0.0,
-                        };
-                        let ok_p = accessibility_sys::AXValueGetValue(
-                            pos_ptr as accessibility_sys::AXValueRef,
-                            accessibility_sys::kAXValueTypeCGPoint,
-                            &mut p as *mut _ as *mut ffi::c_void,
-                        );
-                        let ok_s = accessibility_sys::AXValueGetValue(
-                            size_ptr as accessibility_sys::AXValueRef,
-                            accessibility_sys::kAXValueTypeCGSize,
-                            &mut s as *mut _ as *mut ffi::c_void,
-                        );
-                        if ok_p && ok_s {
-                            info.bounds = WindowBounds {
-                                x: p.x,
-                                y: p.y,
-                                width: s.width,
-                                height: s.height,
-                            };
+                if res == 0 && !focused_window.is_null() {
+                    let mut title_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let title_attr =
+                        CFString::from_static_string(accessibility_sys::kAXTitleAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        title_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut title_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+                    if !title_ptr.is_null() {
+                        let cf_value = CFType::wrap_under_create_rule(title_ptr);
+                        if let Some(s) = cf_value.downcast::<CFString>() {
+                            info.title = s.to_string();
                         }
                     }
+
+                    let mut pos_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let pos_attr =
+                        CFString::from_static_string(accessibility_sys::kAXPositionAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        pos_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut pos_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+
+                    let mut size_ptr: *mut ffi::c_void = ptr::null_mut();
+                    let size_attr =
+                        CFString::from_static_string(accessibility_sys::kAXSizeAttribute);
+                    let _ = accessibility_sys::AXUIElementCopyAttributeValue(
+                        focused_window as _,
+                        size_attr.as_concrete_TypeRef(),
+                        std::ptr::from_mut::<*mut ffi::c_void>(&mut size_ptr)
+                            .cast::<*const ffi::c_void>(),
+                    );
+
+                    if !pos_ptr.is_null() && !size_ptr.is_null() {
+                        #[repr(C)]
+                        struct CGPoint64 {
+                            x: f64,
+                            y: f64,
+                        }
+                        #[repr(C)]
+                        struct CGSize64 {
+                            width: f64,
+                            height: f64,
+                        }
+                        if accessibility_sys::AXValueGetType(
+                            pos_ptr as accessibility_sys::AXValueRef,
+                        ) == accessibility_sys::kAXValueTypeCGPoint
+                            && accessibility_sys::AXValueGetType(
+                                size_ptr as accessibility_sys::AXValueRef,
+                            ) == accessibility_sys::kAXValueTypeCGSize
+                        {
+                            let mut p = CGPoint64 { x: 0.0, y: 0.0 };
+                            let mut s = CGSize64 {
+                                width: 0.0,
+                                height: 0.0,
+                            };
+                            let ok_p = accessibility_sys::AXValueGetValue(
+                                pos_ptr as accessibility_sys::AXValueRef,
+                                accessibility_sys::kAXValueTypeCGPoint,
+                                &mut p as *mut _ as *mut ffi::c_void,
+                            );
+                            let ok_s = accessibility_sys::AXValueGetValue(
+                                size_ptr as accessibility_sys::AXValueRef,
+                                accessibility_sys::kAXValueTypeCGSize,
+                                &mut s as *mut _ as *mut ffi::c_void,
+                            );
+                            if ok_p && ok_s {
+                                info.bounds = WindowBounds {
+                                    x: p.x,
+                                    y: p.y,
+                                    width: s.width,
+                                    height: s.height,
+                                };
+                            }
+                        }
+                    }
+
+                    if !pos_ptr.is_null() {
+                        CFRelease(pos_ptr);
+                    }
+                    if !size_ptr.is_null() {
+                        CFRelease(size_ptr);
+                    }
+                    CFRelease(focused_window);
                 }
+                CFRelease(app_element as *const ffi::c_void);
             }
         }
-    }
-    // Now match via CoreGraphics enumeration; by default, don't check title/bounds.
-    match_active_window(
-        &mut info,
-        MatchOptions {
-            match_title: false,
-            match_bounds: false,
-            bounds_tolerance: 1.0,
-        },
-    )?;
-    Ok(info)
+
+        match_active_window(
+            &mut info,
+            MatchOptions {
+                match_title: false,
+                match_bounds: false,
+                bounds_tolerance: 1.0,
+            },
+        )?;
+        Ok(info)
+    })
 }
 
 // Lazy field accessors for CG window dictionaries
@@ -545,6 +555,9 @@ unsafe extern "C" fn window_focus_callback(
 
 struct ObserverInfo {
     run_loop_source: core_foundation::runloop::CFRunLoopSource,
+    observer: accessibility_sys::AXObserverRef,
+    app_element: accessibility_sys::AXUIElementRef,
+    handler_ptr: *mut Arc<RwLock<dyn FocusChangeHandler>>,
 }
 
 fn run_accessibility_hook_with_mode(
@@ -568,6 +581,7 @@ fn run_accessibility_hook(
     use accessibility_sys::{
         kAXFocusedWindowChangedNotification, AXIsProcessTrusted, AXObserverAddNotification,
         AXObserverCallback, AXObserverCreate, AXObserverGetRunLoopSource,
+        AXObserverRemoveNotification,
         AXUIElementCreateApplication,
     };
 
@@ -587,6 +601,28 @@ fn run_accessibility_hook(
     static mut OBSERVERS: Option<HashMap<i32, ObserverInfo>> = None;
     unsafe {
         OBSERVERS = Some(HashMap::new());
+    }
+    static mut WINDOW_MONITOR_OBSERVER: *mut Object = ptr::null_mut();
+
+    unsafe fn cleanup_observer_info(pid: i32, observer_info: ObserverInfo) {
+        let window_notification = CFString::from_static_string(kAXFocusedWindowChangedNotification);
+        let run_loop = CFRunLoop::get_current();
+        run_loop.remove_source(&observer_info.run_loop_source, kCFRunLoopDefaultMode);
+
+        let result = AXObserverRemoveNotification(
+            observer_info.observer,
+            observer_info.app_element,
+            window_notification.as_concrete_TypeRef(),
+        );
+        trace!(
+            "AXObserverRemoveNotification result for PID {}: {}",
+            pid,
+            result
+        );
+
+        let _ = Box::from_raw(observer_info.handler_ptr);
+        CFRelease(observer_info.app_element as *const ffi::c_void);
+        CFRelease(observer_info.observer as *const ffi::c_void);
     }
 
     unsafe fn create_observer_for_app(
@@ -633,6 +669,8 @@ fn run_accessibility_hook(
                 error_string(result)
             );
             let _ = Box::from_raw(handler_ptr);
+            CFRelease(app_element as *const ffi::c_void);
+            CFRelease(observer as *const ffi::c_void);
             return Err(WinshiftError::Platform(format!(
                 "Failed to add notification for PID {}: {} ({})",
                 pid,
@@ -653,6 +691,9 @@ fn run_accessibility_hook(
         );
         Ok(ObserverInfo {
             run_loop_source: cf_source,
+            observer,
+            app_element,
+            handler_ptr,
         })
     }
 
@@ -664,11 +705,6 @@ fn run_accessibility_hook(
         trace!("Setting up NSWorkspace notifications");
 
         GLOBAL_HANDLER = Some((*handler_ptr).clone());
-
-        let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("WindowMonitorObserver", superclass).ok_or_else(|| {
-            WinshiftError::Platform("Failed to create observer class".to_string())
-        })?;
 
         extern "C" fn application_did_activate(
             this: &Object,
@@ -744,20 +780,12 @@ fn run_accessibility_hook(
                                     match create_observer_for_app(pid, handler) {
                                         Ok(observer_info) => {
                                             trace!("Observer created successfully, cleaning up old observers...");
-                                            let run_loop = CFRunLoop::get_current();
                                             for (old_pid, old_observer_info) in observers.drain() {
                                                 trace!(
-                                                    "Removing CFRunLoop source for old PID: {}",
+                                                    "Cleaning up observer for old PID: {}",
                                                     old_pid
                                                 );
-                                                run_loop.remove_source(
-                                                    &old_observer_info.run_loop_source,
-                                                    kCFRunLoopDefaultMode,
-                                                );
-                                                trace!(
-                                                    "Cleaned up observer for old PID: {}",
-                                                    old_pid
-                                                );
+                                                cleanup_observer_info(old_pid, old_observer_info);
                                             }
 
                                             trace!("Inserting new observer for PID {}...", pid);
@@ -823,13 +851,23 @@ fn run_accessibility_hook(
             }
         }
 
-        decl.add_method(
-            sel!(applicationDidActivate:),
-            application_did_activate as extern "C" fn(&Object, Sel, *mut Object),
-        );
-
-        let observer_class = decl.register();
-        trace!("Created WindowMonitorObserver class");
+        let observer_class = if let Some(existing) = Class::get("WindowMonitorObserver") {
+            trace!("Reusing existing WindowMonitorObserver class");
+            existing
+        } else {
+            let superclass = class!(NSObject);
+            let mut decl =
+                ClassDecl::new("WindowMonitorObserver", superclass).ok_or_else(|| {
+                    WinshiftError::Platform("Failed to create observer class".to_string())
+                })?;
+            decl.add_method(
+                sel!(applicationDidActivate:),
+                application_did_activate as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            let observer_class = decl.register();
+            trace!("Created WindowMonitorObserver class");
+            observer_class
+        };
 
         let observer_instance: *mut Object = msg_send![observer_class, alloc];
         let observer_instance: *mut Object = msg_send![observer_instance, init];
@@ -837,6 +875,12 @@ fn run_accessibility_hook(
         let workspace_class = class!(NSWorkspace);
         let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
         let notification_center: *mut Object = msg_send![workspace, notificationCenter];
+
+        if !WINDOW_MONITOR_OBSERVER.is_null() {
+            let _: () = msg_send![notification_center, removeObserver: WINDOW_MONITOR_OBSERVER];
+            let _: () = msg_send![WINDOW_MONITOR_OBSERVER, release];
+            WINDOW_MONITOR_OBSERVER = ptr::null_mut();
+        }
 
         let notification_name =
             CFString::from_static_string("NSWorkspaceDidActivateApplicationNotification");
@@ -847,6 +891,7 @@ fn run_accessibility_hook(
             name: notification_name.as_concrete_TypeRef()
             object: ptr::null_mut::<Object>()
         ];
+        WINDOW_MONITOR_OBSERVER = observer_instance;
 
         info!("Successfully registered for NSWorkspaceDidActivateApplicationNotification");
         Ok(())
@@ -901,15 +946,23 @@ fn run_accessibility_hook(
         run_cfrunloop(&stop_handle);
 
         if let Some(observers) = (&raw mut OBSERVERS).as_mut().unwrap() {
-            let run_loop = CFRunLoop::get_current();
             for (pid, observer_info) in observers.drain() {
                 trace!("Cleaning up observer for PID: {}", pid);
-                run_loop.remove_source(&observer_info.run_loop_source, kCFRunLoopDefaultMode);
-                trace!("Removed CFRunLoop source for PID: {}", pid);
+                cleanup_observer_info(pid, observer_info);
             }
         }
 
+        let workspace_class = class!(NSWorkspace);
+        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
+        let notification_center: *mut Object = msg_send![workspace, notificationCenter];
+        if !WINDOW_MONITOR_OBSERVER.is_null() {
+            let _: () = msg_send![notification_center, removeObserver: WINDOW_MONITOR_OBSERVER];
+            let _: () = msg_send![WINDOW_MONITOR_OBSERVER, release];
+            WINDOW_MONITOR_OBSERVER = ptr::null_mut();
+        }
+
         CURRENT_RUN_LOOP = None;
+        GLOBAL_HANDLER = None;
         let _ = Box::from_raw(handler_ptr);
         trace!("Accessibility hook stopped");
     }
@@ -939,17 +992,13 @@ fn run_app_only_hook(
     info!("Accessibility permissions verified");
 
     static mut GLOBAL_HANDLER: Option<Arc<RwLock<dyn FocusChangeHandler>>> = None;
+    static mut APP_ONLY_OBSERVER: *mut Object = ptr::null_mut();
     unsafe fn setup_nsworkspace_notifications_only(
         handler_ptr: *mut Arc<RwLock<dyn FocusChangeHandler>>,
     ) -> Result<(), WinshiftError> {
         trace!("Setting up NSWorkspace notifications (app-only mode)");
 
         GLOBAL_HANDLER = Some((*handler_ptr).clone());
-
-        let superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("AppOnlyObserver", superclass).ok_or_else(|| {
-            WinshiftError::Platform("Failed to create observer class".to_string())
-        })?;
 
         extern "C" fn application_did_activate(
             this: &Object,
@@ -1019,18 +1068,32 @@ fn run_app_only_hook(
             }
         }
 
-        decl.add_method(
-            sel!(applicationDidActivate:),
-            application_did_activate as extern "C" fn(&Object, Sel, *mut Object),
-        );
-
-        let observer_class = decl.register();
+        let observer_class = if let Some(existing) = Class::get("AppOnlyObserver") {
+            trace!("Reusing existing AppOnlyObserver class");
+            existing
+        } else {
+            let superclass = class!(NSObject);
+            let mut decl = ClassDecl::new("AppOnlyObserver", superclass).ok_or_else(|| {
+                WinshiftError::Platform("Failed to create observer class".to_string())
+            })?;
+            decl.add_method(
+                sel!(applicationDidActivate:),
+                application_did_activate as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.register()
+        };
         let observer_instance: *mut Object = msg_send![observer_class, alloc];
         let observer_instance: *mut Object = msg_send![observer_instance, init];
 
         let workspace_class = class!(NSWorkspace);
         let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
         let notification_center: *mut Object = msg_send![workspace, notificationCenter];
+
+        if !APP_ONLY_OBSERVER.is_null() {
+            let _: () = msg_send![notification_center, removeObserver: APP_ONLY_OBSERVER];
+            let _: () = msg_send![APP_ONLY_OBSERVER, release];
+            APP_ONLY_OBSERVER = ptr::null_mut();
+        }
 
         let notification_name =
             CFString::from_static_string("NSWorkspaceDidActivateApplicationNotification");
@@ -1041,6 +1104,7 @@ fn run_app_only_hook(
             name: notification_name.as_concrete_TypeRef()
             object: ptr::null_mut::<Object>()
         ];
+        APP_ONLY_OBSERVER = observer_instance;
 
         info!("App-only monitoring active - no window observers created");
         Ok(())
@@ -1080,6 +1144,16 @@ fn run_app_only_hook(
 
         setup_nsworkspace_notifications_only(handler_ptr)?;
         run_cfrunloop(&stop_handle);
+
+        let workspace_class = class!(NSWorkspace);
+        let workspace: *mut Object = msg_send![workspace_class, sharedWorkspace];
+        let notification_center: *mut Object = msg_send![workspace, notificationCenter];
+        if !APP_ONLY_OBSERVER.is_null() {
+            let _: () = msg_send![notification_center, removeObserver: APP_ONLY_OBSERVER];
+            let _: () = msg_send![APP_ONLY_OBSERVER, release];
+            APP_ONLY_OBSERVER = ptr::null_mut();
+        }
+        GLOBAL_HANDLER = None;
         let _ = Box::from_raw(handler_ptr);
         trace!("App-only hook stopped");
     }
@@ -1094,6 +1168,7 @@ fn run_window_only_hook(
     use accessibility_sys::{
         kAXFocusedWindowChangedNotification, AXIsProcessTrusted, AXObserverAddNotification,
         AXObserverCallback, AXObserverCreate, AXObserverGetRunLoopSource,
+        AXObserverRemoveNotification,
         AXUIElementCreateApplication,
     };
 
@@ -1148,6 +1223,8 @@ fn run_window_only_hook(
 
         if result != 0 {
             let _ = Box::from_raw(handler_ptr);
+            CFRelease(app_element as *const ffi::c_void);
+            CFRelease(observer as *const ffi::c_void);
             return Err(WinshiftError::Platform(format!(
                 "Failed to add notification: {result}"
             )));
@@ -1162,6 +1239,9 @@ fn run_window_only_hook(
         info!("Window-only monitoring active for current app PID: {}", pid);
         Ok(ObserverInfo {
             run_loop_source: cf_source,
+            observer,
+            app_element,
+            handler_ptr,
         })
     }
 
@@ -1186,6 +1266,15 @@ fn run_window_only_hook(
 
         let run_loop = CFRunLoop::get_current();
         run_loop.remove_source(&observer_info.run_loop_source, kCFRunLoopDefaultMode);
+        let window_notification = CFString::from_static_string(kAXFocusedWindowChangedNotification);
+        let _ = AXObserverRemoveNotification(
+            observer_info.observer,
+            observer_info.app_element,
+            window_notification.as_concrete_TypeRef(),
+        );
+        let _ = Box::from_raw(observer_info.handler_ptr);
+        CFRelease(observer_info.app_element as *const ffi::c_void);
+        CFRelease(observer_info.observer as *const ffi::c_void);
         let _ = Box::from_raw(handler_ptr);
         trace!("Window-only hook stopped");
     }
